@@ -1,4 +1,6 @@
 //! Implementation of [`TaskContext`]
+use core::sync::atomic::AtomicUsize;
+
 use crate::trap::trap_return;
 
 #[repr(C)]
@@ -10,6 +12,10 @@ pub struct TaskContext {
     sp: usize,
     /// s0-11 register, callee saved
     s: [usize; 12],
+    /// TaskContext derives **NO** meaningful conclusion until this lock is acquired.<br/>
+    /// Do **NOT** use this in Rust code. It's intended for `__switch` synchronization.<br/>
+    /// Use `AtomicUsize` instead of `usize` so the compiler will align it to be atomically accessed.
+    lock: AtomicUsize
 }
 
 impl TaskContext {
@@ -19,6 +25,7 @@ impl TaskContext {
             ra: 0,
             sp: 0,
             s: [0; 12],
+            lock: AtomicUsize::new(0)
         }
     }
     /// Create a new task context with a trap return addr and a kernel stack pointer
@@ -27,6 +34,7 @@ impl TaskContext {
             ra: trap_return as usize,
             sp: kstack_ptr,
             s: [0; 12],
+            lock: AtomicUsize::new(0)
         }
     }
 }

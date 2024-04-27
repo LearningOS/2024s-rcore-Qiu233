@@ -21,7 +21,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::loader::get_app_data_by_name;
+use crate::{loader::get_app_data_by_name, mm::VirtAddr};
 use alloc::sync::Arc;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
@@ -81,10 +81,28 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
     // ++++++ access initproc TCB exclusively
     {
-        let mut initproc_inner = INITPROC.inner_exclusive_access();
-        for child in inner.children.iter() {
-            child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
-            initproc_inner.children.push(child.clone());
+        // CRITICAL:
+        // The original author must have not considered the deadlock caused by `INITPROC.lock()`,
+        // which occurs exactly when a child is exiting and has acquired its lock in this function.
+        // In this case, acquiring that exiting child blocks while that child is also waiting for `INITPROC`.
+        // This solution relaxes dependency by releasing `INITPROC` if any child acquiring fails,
+        // so the exiting child has chance to acquire `INITPROC`.
+        loop {
+            // if locks fail, this is also dropped and acquired again later,
+            // so other harts will have chance to acquire it.
+            let mut initproc_inner = INITPROC.inner_exclusive_access();
+            let locks = inner.children.iter().map(|x|(x, x.try_lock())).collect::<alloc::vec::Vec<_>>();
+            if locks.iter().any(|(_, lock)|lock.is_none()) {
+                drop(locks);
+                drop(inner);
+                inner = task.inner_exclusive_access();
+                continue; // lock failed, go again, the acquired are also released
+            }
+            for (child, lock) in locks.into_iter() {
+                lock.unwrap().parent = Some(Arc::downgrade(&INITPROC));
+                initproc_inner.children.push(child.clone());
+            }
+            break; // only break when all locks are acquired
         }
     }
     // ++++++ release parent PCB
@@ -114,4 +132,9 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// Try to own a shared page which contains the specified virtual address
+pub fn try_to_own_shared(va: usize) -> bool {
+    current_task().unwrap().inner_exclusive_access().memory_set.to_owned(VirtAddr::from(va).floor())
 }

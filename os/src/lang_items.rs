@@ -1,6 +1,6 @@
 //! The panic handler
 
-use crate::sbi::shutdown;
+use crate::{hart::get_hartid, sbi::shutdown};
 use core::panic::PanicInfo;
 
 #[panic_handler]
@@ -8,7 +8,8 @@ use core::panic::PanicInfo;
 fn panic(info: &PanicInfo) -> ! {
     if let Some(location) = info.location() {
         println!(
-            "[kernel] Panicked at {}:{} {}",
+            "[kernel] [{}] Panicked at {}:{} {}",
+            get_hartid(),
             location.file(),
             location.line(),
             info.message().unwrap()

@@ -23,6 +23,7 @@
 #![no_main]
 #![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
+#![feature(linked_list_remove)]
 
 #[macro_use]
 extern crate bitflags;
@@ -44,6 +45,7 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
+mod hart;
 
 use core::arch::global_asm;
 
@@ -97,6 +99,8 @@ fn kernel_log_info() {
     error!("[kernel] .bss [{:#x}, {:#x})", sbss as usize, ebss as usize);
 }
 
+
+
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main() -> ! {
@@ -106,10 +110,7 @@ pub fn rust_main() -> ! {
     mm::remap_test();
     task::add_initproc();
     println!("after initproc!");
-    trap::init();
-    trap::enable_timer_interrupt();
-    timer::set_next_trigger();
     loader::list_apps();
-    task::run_tasks();
+    hart::init_harts();
     panic!("Unreachable in rust_main!");
 }

@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
+use riscv::addr::BitField;
 
 bitflags! {
     /// page table entry flags
@@ -157,6 +158,11 @@ impl PageTable {
     /// get the token from the page table
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
+    }
+    /// Supress writability for the specified mapping
+    pub fn suppress_writability(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.bits.set_bit(2, false);
     }
 }
 

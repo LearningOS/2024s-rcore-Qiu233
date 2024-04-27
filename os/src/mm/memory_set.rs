@@ -4,10 +4,11 @@ use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
-use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use riscv::addr::BitField;
+use spin::Mutex;
 use core::arch::asm;
 use lazy_static::*;
 use riscv::register::satp;
@@ -27,8 +28,7 @@ extern "C" {
 
 lazy_static! {
     /// The kernel's initial memory mapping(kernel address space)
-    pub static ref KERNEL_SPACE: Arc<UPSafeCell<MemorySet>> =
-        Arc::new(unsafe { UPSafeCell::new(MemorySet::new_kernel()) });
+    pub static ref KERNEL_SPACE: Mutex<MemorySet> = Mutex::new(MemorySet::new_kernel());
 }
 /// address space
 pub struct MemorySet {
@@ -233,24 +233,38 @@ impl MemorySet {
             elf.header.pt2.entry_point() as usize,
         )
     }
+
+    /// Try to own a shared page.
+    /// Returns false when it's not shared.
+    pub fn to_owned(&mut self, vpn: VirtPageNum) -> bool {
+        self.areas.iter_mut().map(|x|x.to_owned(&mut self.page_table, vpn)).any(|x|x)
+    }
+
     /// Create a new address space by copy code&data from a exited process's address space.
-    pub fn from_existed_user(user_space: &Self) -> Self {
+    pub fn from_existed_user(user_space: &mut Self) -> Self {
         let mut memory_set = Self::new_bare();
         // map trampoline
         memory_set.map_trampoline();
         // copy data sections/trap_context/user_stack
-        for area in user_space.areas.iter() {
-            let new_area = MapArea::from_another(area);
-            memory_set.push(new_area, None);
-            // copy data from another space
-            for vpn in area.vpn_range {
-                let src_ppn = user_space.translate(vpn).unwrap().ppn();
-                let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
-                dst_ppn
-                    .get_bytes_array()
-                    .copy_from_slice(src_ppn.get_bytes_array());
+        let mut areas = core::mem::take(&mut user_space.areas);
+        for area in areas.iter_mut() {
+            if area.vpn_range.into_iter().any(|x|Self::is_critical(x)) { // critical area cannot have shared portion
+                let new_area = MapArea::from_another(area);
+                memory_set.push(new_area, None); // will allocate frames
+                for vpn in area.vpn_range {
+                    let src_ppn = user_space.translate(vpn).unwrap().ppn();
+                    let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
+                    dst_ppn
+                        .get_bytes_array()
+                        .copy_from_slice(src_ppn.get_bytes_array());
+                }
+            } else { // non-critical area, shared
+                let new_area = area.make_shared(&mut user_space.page_table);
+                memory_set.push(new_area, None); // won't allocate frames because they are shared
             }
+            // copy data from another space
         }
+        user_space.areas = areas;
         memory_set
     }
     /// Change page table by writing satp CSR Register.
@@ -300,16 +314,140 @@ impl MemorySet {
             false
         }
     }
+    /// test if there are mapped area whitin the given range.<br/>
+    /// note that this doesn't check mappings which are not tracked by `MapArea`s
+    fn has_mapped(&self, range: VPNRange) -> bool {
+        self.areas.iter().any(|x|x.vpn_range.intersects(&range))
+    }
+
+    /// test if there are unmapped area whitin the given range.<br/>
+    /// note that this doesn't check mappings which are not tracked by `MapArea`s
+    fn has_unmapped(&self, range: VPNRange) -> bool {
+        let count = self.areas.iter().map(|x|{
+            let (_, _, rem) = x.vpn_range.exclude(&range);
+            rem.into_iter().count()
+        }).sum::<usize>();
+        
+        let expected = range.into_iter().count();
+        count != expected
+    }
+
+    /// Gets whether the specified virtual page is critical and thus cannot be unmapped.
+    fn is_critical(vpn: VirtPageNum) -> bool {
+        if vpn == VirtPageNum::from(VirtAddr::from(TRAMPOLINE)) {
+            return true;
+        } else if vpn == VirtPageNum::from(VirtAddr::from(TRAP_CONTEXT_BASE)) {
+            return true;
+        }
+        return false;
+    }
+
+    /// Try to map virtual address range, with memory not allocated until actual use.
+    pub fn mmap(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> isize  {
+        let area = MapArea::new(start_va, end_va, MapType::Framed, permission);
+        if area.vpn_range.into_iter().any(|x|Self::is_critical(x)) {
+            return -1;
+        }
+        if self.has_mapped(area.vpn_range) {
+            return -1;
+        }
+        self.push(
+            area,
+            None,
+        );
+        0
+    }
+
+    /// Try to unmap virtual address range, except for **critical mappings** such as `TRAMPOLINE` and `TRAP_CONTEXT_BASE`.
+    /// One area will be split into two if it's unmapped in the middle.
+    pub fn munmap(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+    ) -> isize  {
+        let target_range = VPNRange::new(start_va.floor(), end_va.ceil());
+        if target_range.into_iter().any(|x|Self::is_critical(x)) {
+            return -1;
+        }
+        if self.has_unmapped(target_range) {
+            return -1;
+        }
+        let areas = core::mem::take(&mut self.areas);
+        for area in areas.into_iter() {
+            // compute ranges
+            let (l, _, rem) = area.vpn_range.exclude(&target_range);
+            if rem.is_empty() { // nothing to remove in this area, push and skip
+                self.areas.push(area);
+                continue;
+            }
+            let (larea, rarea) = area.split(l.get_end());
+            let (mut marea, rarea) = rarea.split(rem.get_end());
+            // now `larea`/`rarea` are the left/right parts to preserve, respectively
+            // if some of them are empty, then there's no need to push back
+            if !larea.vpn_range.is_empty() {
+                self.areas.push(larea);
+            }
+            if !rarea.vpn_range.is_empty() {
+                self.areas.push(rarea);
+            }
+            marea.unmap(&mut self.page_table);
+            drop(marea); // this can be omitted, but I choose to make it clear that `marea` is collected
+        }
+        0
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
-    data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    data_frames: BTreeMap<VirtPageNum, Frame>,
     map_type: MapType,
     map_perm: MapPermission,
 }
 
 impl MapArea {
+    /// split the given area into two, with the same type and permission.<br/>
+    /// `(self[start..vpn), self[vpn..end))` is returned
+    fn split(self, vpn: VirtPageNum) -> (Self, Self) {
+        let mut other = Self {
+            vpn_range: VPNRange::new(vpn, vpn),
+            data_frames: BTreeMap::new(),
+            map_type: self.map_type, map_perm: self.map_perm
+        };
+        if vpn <= self.vpn_range.get_start() {
+            return (other, self);
+        } else if vpn >= self.vpn_range.get_end() {
+            return (self, other);
+        } else {
+            let mut mapl = BTreeMap::new();
+            let mut mapr = BTreeMap::new();
+            // collect `FrameTracker`s into different maps, according to their vpn
+            for (i, frame) in self.data_frames.into_iter() { // self.data_frames moved here
+                if i < vpn {
+                    mapl.insert(i, frame);
+                } else {
+                    mapr.insert(i, frame);
+                }
+            }
+            let left = Self {
+                vpn_range: VPNRange::new(self.vpn_range.get_start(), vpn),
+                data_frames: mapl,
+                map_type: self.map_type,
+                map_perm: self.map_perm
+            };
+            other = Self {
+                vpn_range: VPNRange::new(vpn, self.vpn_range.get_end()),
+                data_frames: mapr,
+                map_type: self.map_type,
+                map_perm: self.map_perm
+            };
+            return (left, other);
+        }
+    }
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -333,19 +471,64 @@ impl MapArea {
             map_perm: another.map_perm,
         }
     }
+    pub fn make_shared(&mut self, page_table: &mut PageTable) -> Self {
+        let mut new_area = Self::from_another(&self);
+        for (vpn, frame) in self.data_frames.iter_mut() {
+            match frame {
+                Frame::None => {
+                    // the pages yet to be allocated are not shared, see comments of `Frame::share`
+                    new_area.data_frames.insert(*vpn, Frame::None);
+                }
+                Frame::Owned(_) => {
+                    // owned page must be set readonly to be shared
+                    page_table.suppress_writability(*vpn);
+                    new_area.data_frames.insert(*vpn, frame.share());
+                }
+                Frame::Shared(_) => {
+                    new_area.data_frames.insert(*vpn, frame.share());
+                }
+            }
+        }
+        new_area
+    }
+    /// returns true if `vpn` is shared, false otherwise
+    pub fn to_owned(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> bool {
+        if let Some(frame) = self.data_frames.get_mut(&vpn) {
+            if let Some(ppn) = frame.own() {
+                page_table.unmap(vpn);
+                page_table.map(vpn, ppn, PTEFlags::from_bits(self.map_perm.bits).unwrap());
+                return true;
+            }
+        }
+        false
+    }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
+        let mut bits = self.map_perm.bits;
         match self.map_type {
             MapType::Identical => {
                 ppn = PhysPageNum(vpn.0);
             }
             MapType::Framed => {
-                let frame = frame_alloc().unwrap();
-                ppn = frame.ppn;
-                self.data_frames.insert(vpn, frame);
+                let frame_entry = self.data_frames.entry(vpn).or_default();
+                // will be None if absent
+                match frame_entry {
+                    Frame::None => {
+                        let frame = frame_alloc().unwrap();
+                        ppn = frame.ppn;
+                        *frame_entry = frame.into(); // moved
+                    }
+                    Frame::Owned(_) => {
+                        panic!("already mapped");
+                    }
+                    Frame::Shared(shared) => {
+                        bits.set_bit(2, false); // not writable
+                        ppn = shared.ppn;
+                    }
+                }
             }
         }
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        let pte_flags = PTEFlags::from_bits(bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -426,7 +609,7 @@ bitflags! {
 /// remap test in kernel space
 #[allow(unused)]
 pub fn remap_test() {
-    let mut kernel_space = KERNEL_SPACE.exclusive_access();
+    let mut kernel_space = KERNEL_SPACE.lock();
     let mid_text: VirtAddr = ((stext as usize + etext as usize) / 2).into();
     let mid_rodata: VirtAddr = ((srodata as usize + erodata as usize) / 2).into();
     let mid_data: VirtAddr = ((sdata as usize + edata as usize) / 2).into();
@@ -446,4 +629,84 @@ pub fn remap_test() {
         .unwrap()
         .executable(),);
     println!("remap_test passed!");
+}
+
+enum Frame {
+    None,
+    Owned(FrameTracker),
+    Shared(Arc<FrameTracker>)
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl From<FrameTracker> for Frame {
+    fn from(value: FrameTracker) -> Self {
+        Self::Owned(value)
+    }
+}
+
+impl From<Arc<FrameTracker>> for Frame {
+    fn from(value: Arc<FrameTracker>) -> Self {
+        Self::Shared(value)
+    }
+}
+
+impl Frame {
+    /// Share the frame.<br/>
+    /// * panics for `None`
+    /// * for `Owned`, `self` is changed to `Shared` and another `Shared` is returned
+    /// * a clone is returned for `Shared`
+    /// 
+    /// You **MUST** suppress writability of the original mapping if it's `Owned`.
+    fn share(&mut self) -> Self {
+        match core::mem::take(self) {
+            Frame::None => {
+                // Design note: there's no reason to allocate a new shared frame when it's `None`,
+                // because shared frames only diverge on writes, until which the data should be (seen as) all zeros.
+                // In this case, the intended behavior is leaving `None` in both forks.
+                panic!("trying to share None");
+            }
+            Frame::Owned(owned) => {
+                let shared = Arc::new(owned);
+                *self = shared.clone().into();
+                shared.into()
+            }
+            Frame::Shared(shared) => {
+                *self = shared.clone().into();
+                shared.into()
+            }
+        }
+    }
+    /// Own the frame.<br/>
+    /// * returns `None` for `None` and `Owned`
+    /// * returns allocated frame's ppn for `Shared`
+    fn own(&mut self) -> Option<PhysPageNum> {
+        match core::mem::take(self) {
+            Frame::None => {
+                None
+            }
+            Frame::Owned(owned) => { // already owned
+                *self = owned.into();
+                None 
+            }
+            Frame::Shared(shared) => {
+                let frame = match Arc::try_unwrap(shared) {
+                    Ok(x) => x,
+                    Err(shared) => {
+                        let frame = frame_alloc().unwrap(); // allocate a new frame
+                        frame.ppn.get_bytes_array().copy_from_slice(&shared.ppn.get_bytes_array()); // copy all data
+                        frame
+                        // the Arc is dropped here
+                    }
+                };
+                let ppn = frame.ppn;
+                *self = frame.into();
+                Some(ppn)
+            }
+        }
+    }
 }
