@@ -1,5 +1,8 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
+use crate::mm::err::PageError;
+
+use super::err::{MMError, MMResult};
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -73,12 +76,12 @@ pub struct PageTable {
 /// Assume that it won't oom when creating/mapping.
 impl PageTable {
     /// Create a new page table
-    pub fn new() -> Self {
-        let frame = frame_alloc().unwrap();
-        PageTable {
+    pub fn new() -> MMResult<Self> {
+        let frame = frame_alloc().ok_or(MMError::NotEnoughMemory)?;
+        Ok(PageTable {
             root_ppn: frame.ppn,
             frames: vec![frame],
-        }
+        })
     }
     /// Temporarily used to get arguments from user space.
     pub fn from_token(satp: usize) -> Self {
@@ -87,61 +90,68 @@ impl PageTable {
             frames: Vec::new(),
         }
     }
-    /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist<br/>
+    /// Only fails when there's no frame allocated for page table node, and `NotEnoughMemory` is returned.
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> MMResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             if i == 2 {
-                result = Some(pte);
-                break;
+                return Ok(pte);
             }
             if !pte.is_valid() {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc().ok_or(MMError::NotEnoughMemory)?;
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
             ppn = pte.ppn();
         }
-        result
+        unreachable!("impossible");
     }
-    /// Find PageTableEntry by VirtPageNum
-    fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    /// Find PageTableEntry by VirtPageNum<br/>
+    /// Only fails when no corresponding page table tree path exists, and `InvalidDirPage` is returned.
+    fn find_pte(&self, vpn: VirtPageNum) -> MMResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             if i == 2 {
-                result = Some(pte);
-                break;
+                return Ok(pte);
             }
             if !pte.is_valid() {
-                return None;
+                return Err(PageError::InvalidDirPage.into());
             }
             ppn = pte.ppn();
         }
-        result
+        unreachable!("impossible");
     }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte_create(vpn).unwrap();
-        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> MMResult<()> {
+        let pte = self.find_pte_create(vpn)?;
+        // assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        if pte.is_valid() {
+            return Err(PageError::PageAlreadyValid.into());
+        }
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+        Ok(())
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]
-    pub fn unmap(&mut self, vpn: VirtPageNum) {
-        let pte = self.find_pte(vpn).unwrap();
-        assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
+    pub fn unmap(&mut self, vpn: VirtPageNum) -> MMResult<()> {
+        let pte = self.find_pte(vpn)?;
+        // assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
+        if !pte.is_valid() {
+            return Err(PageError::PageInvalid.into());
+        }
         *pte = PageTableEntry::empty();
+        Ok(())
     }
     /// get the page table entry from the virtual page number
-    pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.find_pte(vpn).map(|pte| *pte)
+    pub fn translate(&self, vpn: VirtPageNum) -> MMResult<PageTableEntry> {
+        let pte = self.find_pte(vpn)?;
+        Ok(*pte)
     }
     /// get the token from the page table
     pub fn token(&self) -> usize {
@@ -150,7 +160,7 @@ impl PageTable {
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
-pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
+pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> MMResult<Vec<&'static mut [u8]>> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
     let end = start + len;
@@ -158,7 +168,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
-        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let ppn = page_table.translate(vpn)?.ppn();
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
@@ -169,5 +179,5 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         }
         start = end_va.into();
     }
-    v
+    Ok(v)
 }

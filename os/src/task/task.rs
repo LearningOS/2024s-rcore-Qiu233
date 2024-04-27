@@ -1,4 +1,6 @@
 //! Types related to task management
+use alloc::collections::BTreeMap;
+
 use super::TaskContext;
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
@@ -6,10 +8,40 @@ use crate::mm::{
 };
 use crate::trap::{trap_handler, TrapContext};
 
+/// Holds task info. <br/>
+pub struct TaskInfoBlock {
+    /// Whether the task has already been dispatched
+    pub dispatched: bool,
+    /// Timestamp in ms of the first time this task being dispatched
+    pub dispatched_time: usize,
+    /// Syscall times
+    pub syscall_times: BTreeMap<usize, u32>
+}
+impl TaskInfoBlock {
+    /// empty info block
+    pub fn new() -> Self {
+        TaskInfoBlock {
+            dispatched: false,
+            dispatched_time: 0,
+            syscall_times: BTreeMap::new()
+        }
+    }
+    /// Set the timestamp to now if it's the first to be dispatched
+    pub fn set_timestamp_if_first_dispatched(&mut self) {
+        if !self.dispatched {
+            self.dispatched_time = crate::timer::get_time_ms();
+            self.dispatched = true;
+        }
+    }
+}
+
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
     /// Save task context
     pub task_cx: TaskContext,
+
+    /// task info block
+    pub task_info: TaskInfoBlock,
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
@@ -42,7 +74,9 @@ impl TaskControlBlock {
     /// Based on the elf info in program, build the contents of task in a new address space
     pub fn new(elf_data: &[u8], app_id: usize) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let segs = MemorySet::from_elf(elf_data);
+        assert!(segs.is_ok(), "failed to allocate memory for program, err={}", segs.err().unwrap());
+        let (mut memory_set, user_sp, entry_point) = segs.unwrap();
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -50,14 +84,16 @@ impl TaskControlBlock {
         let task_status = TaskStatus::Ready;
         // map a kernel-stack in kernel space
         let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(app_id);
-        KERNEL_SPACE.exclusive_access().insert_framed_area(
+        let kernel_stack_alloc = KERNEL_SPACE.exclusive_access().insert_framed_area_strict(
             kernel_stack_bottom.into(),
             kernel_stack_top.into(),
             MapPermission::R | MapPermission::W,
         );
+        assert!(kernel_stack_alloc.is_ok(), "failed to allocate memory for kernel stack for appid = {}, err = {}", app_id, kernel_stack_alloc.err().unwrap());
         let task_control_block = Self {
             task_status,
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+            task_info: TaskInfoBlock::new(),
             memory_set,
             trap_cx_ppn,
             base_size: user_sp,
@@ -89,7 +125,7 @@ impl TaskControlBlock {
             self.memory_set
                 .append_to(VirtAddr(self.heap_bottom), VirtAddr(new_brk as usize))
         };
-        if result {
+        if result.is_ok() {
             self.program_brk = new_brk as usize;
             Some(old_break)
         } else {

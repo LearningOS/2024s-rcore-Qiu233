@@ -204,7 +204,7 @@ impl StepByOne for VirtPageNum {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 /// a simple range structure for type T
 pub struct SimpleRange<T>
 where
@@ -221,11 +221,53 @@ where
         assert!(start <= end, "start {:?} > end {:?}!", start, end);
         Self { l: start, r: end }
     }
+    pub fn by_len(start: T, len: usize) -> Self {
+        let mut end = start;
+        for _ in 0..len {
+            end.step();
+        }
+        Self::new(start, end)
+    }
     pub fn get_start(&self) -> T {
         self.l
     }
     pub fn get_end(&self) -> T {
         self.r
+    }
+    pub fn is_empty(&self) -> bool {
+        self.l >= self.r
+    }
+    pub fn contains(&self, v: &T) -> bool {
+        self.l <= *v && *v < self.r
+    }
+    pub fn intersection(&self, other: &Self) -> Self {
+        let maxl = if other.l < self.l {self.l} else {other.l};
+        let minr = if other.r < self.r {other.r} else {self.r};
+        let r = if minr < maxl {maxl} else {minr};
+        Self {l:maxl, r}
+    }
+    pub fn intersects(&self, other: &Self) -> bool {
+        !self.intersection(&other).is_empty()
+    }
+    fn exclude_lefthalf(&self, other: &Self) -> Self {
+        let t = 
+            if other.l < self.l {self.l} 
+            else if other.l <= self.r {other.l} 
+            else {self.r};
+        Self {l:self.l, r:t}
+    }
+    fn exclude_righthalf(&self, other: &Self) -> Self {
+        let t = 
+            if other.r > self.r {self.r} 
+            else if other.r >= self.l {other.r}
+            else {self.l};
+        Self {l:t, r:self.r}
+    }
+    pub fn exclude(&self, other: &Self) -> (Self, Self, Self) {
+        let l = self.exclude_lefthalf(other);
+        let r = self.exclude_righthalf(other);
+        let rem = Self {l:l.r, r: r.l};
+        (l, r, rem)
     }
 }
 impl<T> IntoIterator for SimpleRange<T>
@@ -260,7 +302,7 @@ where
 {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current == self.end {
+        if self.current >= self.end {
             None
         } else {
             let t = self.current;

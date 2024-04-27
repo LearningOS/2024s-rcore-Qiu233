@@ -17,7 +17,7 @@ mod context;
 use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::syscall::syscall;
 use crate::task::{
-    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,
+    current_trap_cx, current_user_token, ensure_page_exec, ensure_page_read, ensure_page_write, exit_current_and_run_next, suspend_current_and_run_next
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -69,11 +69,45 @@ pub fn trap_handler() -> ! {
             cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
         }
         Trap::Exception(Exception::StoreFault)
-        | Trap::Exception(Exception::StorePageFault)
-        | Trap::Exception(Exception::LoadFault)
-        | Trap::Exception(Exception::LoadPageFault) => {
+        | Trap::Exception(Exception::LoadFault) => {
             println!("[kernel] PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
             exit_current_and_run_next();
+        }
+        Trap::Exception(Exception::LoadPageFault) => {
+            match ensure_page_read(stval.into()) {
+                Ok(_) => {
+                    trace!("[kernel] Encountered PageFault, but successfully allocated backing frame, addr = {:#x}, instruction = {:#x}", stval, cx.sepc);
+                }
+                Err(e) => {
+                    println!("[kernel] Non-recoverable PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, err = {:?}, kernel killed it.", stval, cx.sepc, e);
+                    exit_current_and_run_next();
+                }
+            }
+        }
+        Trap::Exception(Exception::StorePageFault) => {
+            match ensure_page_write(stval.into()) {
+                Ok(_) => {
+                    trace!("[kernel] Encountered PageFault, but successfully allocated backing frame, addr = {:#x}, instruction = {:#x}", stval, cx.sepc);
+                }
+                Err(e) => {
+                    println!("[kernel] Non-recoverable PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, err = {:?}, kernel killed it.", stval, cx.sepc, e);
+                    exit_current_and_run_next();
+                }
+            }
+
+        }
+        Trap::Exception(Exception::InstructionPageFault) => {
+            // println!("[kernel] !PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
+            // exit_current_and_run_next();
+            match ensure_page_exec(stval.into()) {
+                Ok(_) => {
+                    trace!("[kernel] Encountered PageFault, but successfully allocated backing frame, addr = {:#x}, instruction = {:#x}", stval, cx.sepc);
+                }
+                Err(e) => {
+                    println!("[kernel] Non-recoverable PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, err = {:?}, kernel killed it.", stval, cx.sepc, e);
+                    exit_current_and_run_next();
+                }
+            }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
