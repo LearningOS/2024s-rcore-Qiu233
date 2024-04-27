@@ -130,6 +130,7 @@ impl MapArea {
         match page_table.unmap(vpn) {
             Ok(_) => Ok(()),
             Err(MMError::PageError(PageError::InvalidDirPage)) => Ok(()), // this error also indicates the frame is not prepared
+            Err(MMError::PageError(PageError::PageInvalid)) => Ok(()),
             Err(e) => Err(e)
         }
     }
