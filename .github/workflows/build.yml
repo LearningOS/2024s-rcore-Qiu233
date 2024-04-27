@@ -40,14 +40,14 @@ jobs:
           git clone https://github.com/LearningOS/rCore-Tutorial-Checker-2024S.git ci-user
           git clone https://github.com/LearningOS/rCore-Tutorial-Test-2024S.git ci-user/user
           ID=`git rev-parse --abbrev-ref HEAD | grep -oP 'ch\K[0-9]'`
-          cd ci-user && make test CHAPTER=$ID passwd=${{ secrets.BASE_TEST_TOKEN }} > ../output.txt
-          # cd ci-user && make test CHAPTER=$ID passwd=${{ secrets.BASE_TEST_TOKEN }}
+          # cd ci-user && make test CHAPTER=$ID passwd=${{ secrets.BASE_TEST_TOKEN }} > ../output.txt
+          cd ci-user && make test CHAPTER=$ID passwd=${{ secrets.BASE_TEST_TOKEN }}
           cat ../output.txt
       - name: end
         id: end
         run: |
-          cat output.txt | grep -a "Test passed" | grep -oP "\d{1,}/\d{1,}" | xargs -i echo "points={}"
-          cat output.txt | grep -a "Test passed" | grep -oP "\d{1,}/\d{1,}" | xargs -i echo "points={}" >> $GITHUB_OUTPUT
+          # cat output.txt | grep -a "Test passed" | grep -oP "\d{1,}/\d{1,}" | xargs -i echo "points={}"
+          # cat output.txt | grep -a "Test passed" | grep -oP "\d{1,}/\d{1,}" | xargs -i echo "points={}" >> $GITHUB_OUTPUT
   gitlab-mirror:
     if: github.repository == 'LearningOS/rCore-Tutorial-Code-2024S'
     runs-on: ubuntu-latest
