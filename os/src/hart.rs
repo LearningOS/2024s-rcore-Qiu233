@@ -38,9 +38,8 @@ mod hart_init {
         unsafe {
             let addr = *(DTB_POINTER as usize as *const usize);
             trace!("DTB address = {:#x}", addr);
-            let reader = dtb::Reader::read_from_address(addr).expect("failed to parse dtb");
-            reader.struct_items()
-                .filter_map(|x|x.name().ok())
+            let dtb = hermit_dtb::Dtb::from_raw(addr as *const u8).expect("failed to parse dtb");
+            dtb.enum_subnodes("cpus")
                 .filter(|x|x.contains("cpu@"))
                 .filter_map(|x|x.split("@").nth(1))
                 .filter_map(|x|x.parse::<usize>().ok())
