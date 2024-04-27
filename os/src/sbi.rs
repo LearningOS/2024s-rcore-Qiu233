@@ -46,3 +46,19 @@ pub fn shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
     panic!("It should shutdown!");
 }
+
+/// use sbi call to start another hart
+pub fn hart_start(hartid: usize, start_addr: usize, opaque: usize) -> isize {
+    let mut ret;
+    unsafe {
+        asm!(
+            "li x16, 0",
+            "li x17, 0x48534D",
+            "ecall",
+            inlateout("x10") hartid => ret,
+            in("x11") start_addr,
+            in("x12") opaque,
+        );
+    }
+    ret
+}

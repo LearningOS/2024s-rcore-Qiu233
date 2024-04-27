@@ -16,10 +16,9 @@ __alltraps:
     sd x1, 1*8(sp)
     # skip sp(x2), we will save it later
     sd x3, 3*8(sp)
-    # skip tp(x4), application does not use it
-    # save x5~x31
-    .set n, 5
-    .rept 27
+    # save x4~x31
+    .set n, 4
+    .rept 28
         SAVE_GP %n
         .set n, n+1
     .endr
@@ -35,6 +34,8 @@ __alltraps:
     ld t0, 34*8(sp)
     # load trap_handler into t1
     ld t1, 36*8(sp)
+    # load kernel_tp into tp
+    ld tp, 37*8(sp)
     # move to kernel_sp
     ld sp, 35*8(sp)
     # switch to kernel space
@@ -50,6 +51,8 @@ __restore:
     sfence.vma
     csrw sscratch, a0
     mv sp, a0
+    # store kernel_tp
+    sd tp, 37*8(sp)
     # now sp points to TrapContext in user space, start restoring based on it
     # restore sstatus/sepc
     ld t0, 32*8(sp)
@@ -59,8 +62,8 @@ __restore:
     # restore general purpose registers except x0/sp/tp
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
-    .set n, 5
-    .rept 27
+    .set n, 4
+    .rept 28
         LOAD_GP %n
         .set n, n+1
     .endr

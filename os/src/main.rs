@@ -24,12 +24,13 @@
 #![no_main]
 #![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
+#![feature(linked_list_remove)]
 
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
 extern crate log;
-
+#[macro_use]
 extern crate alloc;
 
 #[macro_use]
@@ -46,6 +47,7 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
+mod hart;
 
 use core::arch::global_asm;
 
@@ -70,11 +72,11 @@ pub fn rust_main() -> ! {
     logging::init();
     mm::init();
     mm::remap_test();
-    trap::init();
-    trap::enable_timer_interrupt();
-    timer::set_next_trigger();
-    fs::list_apps();
-    task::add_initproc();
-    task::run_tasks();
+    hart::init_harts(||{
+        // These two actions must be performed **AFTER** initialization of the booting hart, or else gdb debug will hang.
+        // Nevertheless, for unknown reason, `make run` without debuggingg always works well even when preceding `init_harts`.
+        task::add_initproc();
+        fs::list_apps();
+    });
     panic!("Unreachable in rust_main!");
 }

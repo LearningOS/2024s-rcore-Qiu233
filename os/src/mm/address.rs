@@ -1,3 +1,4 @@
+//! Implementation of physical and virtual address and page number.
 use super::PageTableEntry;
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
@@ -242,6 +243,41 @@ where
     }
     pub fn get_end(&self) -> T {
         self.r
+    }
+    pub fn is_empty(&self) -> bool {
+        self.l >= self.r
+    }
+    // pub fn contains(&self, v: &T) -> bool {
+    //     self.l <= *v && *v < self.r
+    // }
+    pub fn intersection(&self, other: &Self) -> Self {
+        let maxl = if other.l < self.l {self.l} else {other.l};
+        let minr = if other.r < self.r {other.r} else {self.r};
+        let r = if minr < maxl {maxl} else {minr};
+        Self {l:maxl, r}
+    }
+    pub fn intersects(&self, other: &Self) -> bool {
+        !self.intersection(&other).is_empty()
+    }
+    fn exclude_lefthalf(&self, other: &Self) -> Self {
+        let t = 
+            if other.l < self.l {self.l} 
+            else if other.l <= self.r {other.l} 
+            else {self.r};
+        Self {l:self.l, r:t}
+    }
+    fn exclude_righthalf(&self, other: &Self) -> Self {
+        let t = 
+            if other.r > self.r {self.r} 
+            else if other.r >= self.l {other.r}
+            else {self.l};
+        Self {l:t, r:self.r}
+    }
+    pub fn exclude(&self, other: &Self) -> (Self, Self, Self) {
+        let l = self.exclude_lefthalf(other);
+        let r = self.exclude_righthalf(other);
+        let rem = Self {l:l.r, r: r.l};
+        (l, r, rem)
     }
 }
 impl<T> IntoIterator for SimpleRange<T>

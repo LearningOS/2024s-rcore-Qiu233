@@ -17,8 +17,7 @@ mod context;
 use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::syscall::syscall;
 use crate::task::{
-    check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
-    exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
+    check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next, try_to_own_shared, SignalFlags
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -73,7 +72,6 @@ pub fn trap_handler() -> ! {
             cx.x[10] = result as usize;
         }
         Trap::Exception(Exception::StoreFault)
-        | Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::InstructionFault)
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
@@ -84,7 +82,22 @@ pub fn trap_handler() -> ! {
                 stval,
                 current_trap_cx().sepc,
             );
-            current_add_signal(SignalFlags::SIGSEGV);
+            // page fault exit code
+            exit_current_and_run_next(-2);
+        }
+        Trap::Exception(Exception::StorePageFault) => {
+            if try_to_own_shared(stval) {
+                trace!("[kernel] encountered StorePageFault but successfully owned the shared page");
+            } else {
+                println!(
+                    "[kernel] trap_handler:  {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
+                    scause.cause(),
+                    stval,
+                    current_trap_cx().sepc,
+                );
+                // page fault exit code
+                current_add_signal(SignalFlags::SIGILL);
+            }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             current_add_signal(SignalFlags::SIGILL);
@@ -146,7 +159,7 @@ pub fn trap_return() -> ! {
 /// Todo: Chapter 9: I/O device
 pub fn trap_from_kernel() -> ! {
     use riscv::register::sepc;
-    trace!("stval = {:#x}, sepc = {:#x}", stval::read(), sepc::read());
+    error!("stval = {:#x}, sepc = {:#x}", stval::read(), sepc::read());
     panic!("a trap {:?} from kernel!", scause::read().cause());
 }
 

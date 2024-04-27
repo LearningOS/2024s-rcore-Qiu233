@@ -1,7 +1,7 @@
 use super::File;
 use crate::mm::UserBuffer;
-use crate::sync::UPSafeCell;
 use alloc::sync::{Arc, Weak};
+use spin::Mutex;
 
 use crate::task::suspend_current_and_run_next;
 
@@ -9,12 +9,12 @@ use crate::task::suspend_current_and_run_next;
 pub struct Pipe {
     readable: bool,
     writable: bool,
-    buffer: Arc<UPSafeCell<PipeRingBuffer>>,
+    buffer: Arc<Mutex<PipeRingBuffer>>,
 }
 
 impl Pipe {
     /// create readable pipe
-    pub fn read_end_with_buffer(buffer: Arc<UPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
         Self {
             readable: true,
             writable: false,
@@ -22,7 +22,7 @@ impl Pipe {
         }
     }
     /// create writable pipe
-    pub fn write_end_with_buffer(buffer: Arc<UPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
         Self {
             readable: false,
             writable: true,
@@ -101,10 +101,10 @@ impl PipeRingBuffer {
 
 /// Return (read_end, write_end)
 pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
-    let buffer = Arc::new(unsafe { UPSafeCell::new(PipeRingBuffer::new()) });
+    let buffer = Arc::new(Mutex::new(PipeRingBuffer::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
-    buffer.exclusive_access().set_write_end(&write_end);
+    buffer.lock().set_write_end(&write_end);
     (read_end, write_end)
 }
 
@@ -121,7 +121,7 @@ impl File for Pipe {
         let mut buf_iter = buf.into_iter();
         let mut already_read = 0usize;
         loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
+            let mut ring_buffer = self.buffer.lock();
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
                 if ring_buffer.all_write_ends_closed() {
@@ -152,7 +152,7 @@ impl File for Pipe {
         let mut buf_iter = buf.into_iter();
         let mut already_write = 0usize;
         loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
+            let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
                 drop(ring_buffer);
@@ -172,5 +172,8 @@ impl File for Pipe {
                 }
             }
         }
+    }
+    fn stat(&self) -> Option<super::Stat> {
+        None
     }
 }

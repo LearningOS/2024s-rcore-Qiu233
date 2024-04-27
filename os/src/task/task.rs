@@ -4,17 +4,13 @@ use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, Sign
 use crate::{
     config::TRAP_CONTEXT_BASE,
     fs::{File, Stdin, Stdout},
-    mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
-    sync::UPSafeCell,
+    mm::{translated_refmut, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     trap::{trap_handler, TrapContext},
 };
 use alloc::{
-    string::String,
-    sync::{Arc, Weak},
-    vec,
-    vec::Vec,
+    collections::BTreeMap, string::String, sync::{Arc, Weak}, vec::Vec
 };
-use core::cell::RefMut;
+use spin::{Mutex, MutexGuard};
 
 /// Task control block structure
 ///
@@ -28,13 +24,17 @@ pub struct TaskControlBlock {
     pub kernel_stack: KernelStack,
 
     /// Mutable
-    inner: UPSafeCell<TaskControlBlockInner>,
+    inner: Mutex<TaskControlBlockInner>,
 }
 
 impl TaskControlBlock {
+    /// Try to lock
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, TaskControlBlockInner>> {
+        self.inner.try_lock()
+    }
     /// Get the mutable reference of the inner TCB
-    pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
-        self.inner.exclusive_access()
+    pub fn inner_exclusive_access(&self) -> MutexGuard<'_, TaskControlBlockInner> {
+        self.inner.lock()
     }
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
@@ -43,6 +43,25 @@ impl TaskControlBlock {
     }
 }
 
+/// Holds task info. <br/>
+#[derive(Default)]
+pub struct TaskInfoBlock {
+    /// Whether the task has already been dispatched
+    pub dispatched: bool,
+    /// Timestamp in ms of the first time this task being dispatched
+    pub dispatched_time: usize,
+    /// Syscall times
+    pub syscall_times: BTreeMap<usize, u32>
+}
+impl TaskInfoBlock {
+    /// Set the timestamp to now if it's the first to be dispatched
+    pub fn set_timestamp_if_first_dispatched(&mut self) {
+        if !self.dispatched {
+            self.dispatched_time = crate::timer::get_time_ms();
+            self.dispatched = true;
+        }
+    }
+}
 pub struct TaskControlBlockInner {
     /// The physical page number of the frame where the trap context is placed
     pub trap_cx_ppn: PhysPageNum,
@@ -53,6 +72,14 @@ pub struct TaskControlBlockInner {
 
     /// Save task context
     pub task_cx: TaskContext,
+
+    pub task_info: TaskInfoBlock,
+    
+    /// scheduling priority
+    pub priority: isize,
+
+    /// current stride
+    pub stride: usize,
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
@@ -131,11 +158,14 @@ impl TaskControlBlock {
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
+            inner: 
+                Mutex::new(TaskControlBlockInner {
                     trap_cx_ppn,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_info: TaskInfoBlock::default(),
+                    priority: 16,
+                    stride: 0,
                     task_status: TaskStatus::Ready,
                     memory_set,
                     parent: None,
@@ -159,14 +189,13 @@ impl TaskControlBlock {
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                 })
-            },
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.exclusive_access().token(),
+            KERNEL_SPACE.lock().token(),
             kernel_stack_top,
             trap_handler as usize,
         );
@@ -216,7 +245,7 @@ impl TaskControlBlock {
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.exclusive_access().token(),
+            KERNEL_SPACE.lock().token(),
             self.kernel_stack.get_top(),
             trap_handler as usize,
         );
@@ -231,7 +260,7 @@ impl TaskControlBlock {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
+        let memory_set = MemorySet::from_existed_user(&mut parent_inner.memory_set);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -252,11 +281,14 @@ impl TaskControlBlock {
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
+            inner:
+                Mutex::new(TaskControlBlockInner {
                     trap_cx_ppn,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_info: TaskInfoBlock::default(), // should they be inherited?
+                    priority: 16,
+                    stride: 0,
                     task_status: TaskStatus::Ready,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
@@ -275,7 +307,7 @@ impl TaskControlBlock {
                     program_brk: parent_inner.program_brk,
                 })
             },
-        });
+        );
         // add child
         parent_inner.children.push(task_control_block.clone());
         // modify kernel_sp in trap_cx
@@ -286,6 +318,13 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a child process
+    pub fn spawn(&self, elf_data: &[u8]) -> Arc<Self> {
+        let tcb = Arc::from(TaskControlBlock::new(elf_data));
+        self.inner_exclusive_access().children.push(tcb.clone());
+        tcb
     }
 
     /// get pid of process
@@ -317,6 +356,47 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+    
+    /// Increment syscall count for the given id
+    pub fn inc_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+        let times = &mut inner.task_info.syscall_times;
+        *times.entry(syscall_id).or_default() += 1;
+    }
+
+    /// Get task status of the current task
+    pub fn get_task_status(&self) -> TaskStatus {
+        self.inner_exclusive_access().task_status
+    }
+
+    /// Get syscall times
+    pub fn get_syscall_times(&self, map: &mut [u32]) {
+        let inner = self.inner_exclusive_access();
+        for (id, n) in inner.task_info.syscall_times.iter() {
+            map[*id] = *n;
+        }
+    }
+
+    /// Get dispatched time.
+    pub fn get_dispatched_time(&self) -> usize {
+        self.inner_exclusive_access().task_info.dispatched_time
+    }
+
+    /// Map virtual page to physical page
+    pub fn mmap(&self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> isize {
+        self.inner_exclusive_access().memory_set.mmap(start_va, end_va, permission)
+    }
+
+    /// Unmap virtual page
+    pub fn munmap(&self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        self.inner_exclusive_access().memory_set.munmap(start_va, end_va)
+    }
+
+    /// Set priority
+    pub fn set_priority(&self, prio: isize) {
+        assert!(prio > 1, "priority must be larger than 1");
+        self.inner_exclusive_access().priority = prio;
     }
 }
 
