@@ -6,7 +6,7 @@ use core::fmt::{Debug, Formatter, Result};
 /// Magic number for sanity check
 const EFS_MAGIC: u32 = 0x3b800001;
 /// The max number of direct inodes
-const INODE_DIRECT_COUNT: usize = 28;
+const INODE_DIRECT_COUNT: usize = 27;
 /// The max length of inode name
 const NAME_LENGTH_LIMIT: usize = 27;
 /// The max number of indirect1 inodes
@@ -82,6 +82,7 @@ type DataBlock = [u8; BLOCK_SZ];
 #[repr(C)]
 pub struct DiskInode {
     pub size: u32,
+    pub links: u32,
     pub direct: [u32; INODE_DIRECT_COUNT],
     pub indirect1: u32,
     pub indirect2: u32,
@@ -89,10 +90,114 @@ pub struct DiskInode {
 }
 
 impl DiskInode {
+    pub fn get_links(&self) -> u32 {
+        self.links
+    }
+    pub fn inc_links(&mut self) -> u32 {
+        let links = self.links;
+        self.links += 1;
+        links
+    }
+    pub fn dec_links(&mut self) -> u32 {
+        let links = self.links;
+        self.links -= 1;
+        links
+    }
+    pub fn dir_entries(&self, block_device: &Arc<dyn BlockDevice>) -> Vec<DirEntry> {
+        assert!(self.is_dir());
+        assert!(self.size % (DIRENT_SZ as u32) == 0);
+        let count = (self.size as usize) / DIRENT_SZ;
+        (0..count).into_iter().map(|i|{
+            let mut ent: DirEntry = DirEntry::empty();
+            self.read_at(i * DIRENT_SZ, ent.as_bytes_mut(), block_device);
+            ent
+        })
+        .collect()
+    }
+    /// decrease the size
+    pub fn decrease_size(&mut self, new_size: u32, block_device: &Arc<dyn BlockDevice>) -> Vec<u32> {
+        let mut v: Vec<u32> = Vec::new();
+        let mut original_blocks = self.data_blocks() as usize;
+        self.size = new_size;
+        let mut decreased_blocks = self.data_blocks() as usize;
+        
+        // direct
+        while decreased_blocks < original_blocks.min(INODE_DIRECT_COUNT) {
+            v.push(self.direct[decreased_blocks]);
+            self.direct[decreased_blocks] = 0;
+            decreased_blocks += 1;
+        }
+        // decide whether go to indirect1
+        // if enumeration exhausted, no
+        // if original block is less than direct capacity, no
+        if decreased_blocks == original_blocks || original_blocks <= INODE_DIRECT_COUNT {
+            return v;
+        }
+        // indirect1 block
+        v.push(self.indirect1);
+        original_blocks -= INODE_DIRECT_COUNT;
+        decreased_blocks -= INODE_DIRECT_COUNT;
+        
+        // indirect1
+        get_block_cache(self.indirect1 as usize, Arc::clone(block_device))
+            .lock()
+            .modify(0, |indirect1: &mut IndirectBlock| {
+                while decreased_blocks < original_blocks.min(INODE_INDIRECT1_COUNT) {
+                    v.push(indirect1[decreased_blocks]);
+                    //indirect1[current_blocks] = 0;
+                    decreased_blocks += 1;
+                }
+            });
+        self.indirect1 = 0;
+        if decreased_blocks == original_blocks || original_blocks <= INODE_INDIRECT1_COUNT {
+            return v;
+        }
+        
+        v.push(self.indirect2);
+        original_blocks -= INODE_INDIRECT1_COUNT;
+        // decreased_blocks -= INODE_INDIRECT1_COUNT;
+
+        assert!(original_blocks <= INODE_INDIRECT2_COUNT);
+        let a1 = original_blocks / INODE_INDIRECT1_COUNT;
+        let b1 = original_blocks % INODE_INDIRECT1_COUNT;
+        get_block_cache(self.indirect2 as usize, Arc::clone(block_device))
+            .lock()
+            .modify(0, |indirect2: &mut IndirectBlock| {
+                // full indirect1 blocks
+                for entry in indirect2.iter_mut().take(a1) {
+                    v.push(*entry);
+                    get_block_cache(*entry as usize, Arc::clone(block_device))
+                        .lock()
+                        .modify(0, |indirect1: &mut IndirectBlock| {
+                            for entry in indirect1.iter() {
+                                v.push(*entry);
+                            }
+                        });
+                }
+                // last indirect1 block
+                if b1 > 0 {
+                    v.push(indirect2[a1]);
+                    get_block_cache(indirect2[a1] as usize, Arc::clone(block_device))
+                        .lock()
+                        .modify(0, |indirect1: &mut IndirectBlock| {
+                            for entry in indirect1.iter().take(b1) {
+                                v.push(*entry);
+                            }
+                        });
+                    //indirect2[a1] = 0;
+                }
+            });
+        self.indirect2 = 0;
+        v
+    }
+}
+
+impl DiskInode {
     /// Initialize a disk inode, as well as all direct inodes under it
     /// indirect1 and indirect2 block are allocated only when they are needed
     pub fn initialize(&mut self, type_: DiskInodeType) {
         self.size = 0;
+        self.links = 1; // links is 1 as initial state
         self.direct.iter_mut().for_each(|v| *v = 0);
         self.indirect1 = 0;
         self.indirect2 = 0;

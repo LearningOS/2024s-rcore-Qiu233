@@ -1,4 +1,5 @@
 //! Implementation of [`TrapContext`]
+
 use riscv::register::sstatus::{self, Sstatus, SPP};
 
 #[repr(C)]
@@ -17,6 +18,8 @@ pub struct TrapContext {
     pub kernel_sp: usize,
     /// Virtual address of trap handler entry point in kernel
     pub trap_handler: usize,
+    /// Kernel hart local data pointer
+    pub kernel_tp: usize,
 }
 
 impl TrapContext {
@@ -30,7 +33,7 @@ impl TrapContext {
         sp: usize,
         kernel_satp: usize,
         kernel_sp: usize,
-        trap_handler: usize,
+        trap_handler: usize
     ) -> Self {
         let mut sstatus = sstatus::read();
         // set CPU privilege to User after trapping back
@@ -42,6 +45,7 @@ impl TrapContext {
             kernel_satp,  // addr of page table
             kernel_sp,    // kernel stack
             trap_handler, // addr of trap_handler function
+            kernel_tp: 0, // will be set in `__restore`
         };
         cx.set_sp(sp); // app's user stack pointer
         cx // return initial Trap Context of app

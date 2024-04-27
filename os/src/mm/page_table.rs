@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
+use riscv::addr::BitField;
 
 bitflags! {
     /// page table entry flags
@@ -156,6 +157,11 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+    /// Supress writability for the specified mapping
+    pub fn suppress_writability(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.bits.set_bit(2, false);
+    }
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
@@ -274,5 +280,38 @@ impl Iterator for UserBufferIterator {
             }
             Some(r)
         }
+    }
+}
+
+impl UserBufferIterator {
+    /// Copy from a pointer as many bytes as size of type parameter `T`.<br/>
+    /// Will advance the iterator by copied length.<br/>
+    /// Number of copied bytes are returned.
+    pub fn copy_from<T>(&mut self, valref: &T) -> usize {
+        let ptr = valref as *const T as *const u8;
+        let size = core::mem::size_of::<T>();
+        for i in 0..size {
+            if let Some(inner) = self.next() {
+                unsafe {
+                    *inner = *(ptr.wrapping_add(i));
+                }
+            } else {
+                return i;
+            }
+        }
+        return size;
+    }
+}
+
+
+impl UserBuffer {
+    /// Create from pointer of user space
+    pub fn from_mut_ptr<T>(token: usize, user_ptr: *mut T) -> Self {
+        Self::new(translated_byte_buffer(token, user_ptr as *const u8, core::mem::size_of::<T>()))
+    }
+    /// Copy from kernel space, to the start of user buffer.
+    pub fn copy_from<T>(self, valref: &T) {
+        let bytes = self.into_iter().copy_from(valref);
+        assert!(bytes == core::mem::size_of::<T>());
     }
 }
