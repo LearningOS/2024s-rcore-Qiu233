@@ -17,6 +17,7 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::task::task::TaskInfoBlock;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -51,10 +52,12 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
+        let mut tasks: [TaskControlBlock; MAX_APP_NUM] =
+            core::array::from_fn(|_|{TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+            task_info: TaskInfoBlock::new()
+        }});
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -80,6 +83,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        task0.task_info.set_timestamp_if_first_dispatched(); // set dispatched_time
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -123,6 +127,7 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+            inner.tasks[next].task_info.set_timestamp_if_first_dispatched(); // set dispatched_time
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -134,6 +139,37 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// Get dispatched time.
+    pub fn get_dispatched_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_info.dispatched_time
+    }
+    
+    /// Get syscall times, cloned.
+    fn get_syscall_times(&self, map: &mut [u32; crate::config::MAX_SYSCALL_NUM]) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        for (id, n) in inner.tasks[current].task_info.syscall_times.iter() {
+            map[*id] = *n;
+        }
+    }
+
+    /// Get task status of the current task.
+    fn get_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_status
+    }
+
+    /// Increment syscall count for the given id, by one
+    pub fn inc_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let times = &mut inner.tasks[current].task_info.syscall_times;
+        *times.entry(syscall_id).or_default() += 1;
     }
 }
 
@@ -168,4 +204,24 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Get syscall times, cloned
+pub fn get_syscall_times(map: &mut [u32; crate::config::MAX_SYSCALL_NUM]) {
+    TASK_MANAGER.get_syscall_times(map)
+}
+
+/// Get dispatched time.
+pub fn get_dispatched_time() -> usize {
+    TASK_MANAGER.get_dispatched_time()
+}
+
+/// Get task status of the current task
+pub fn get_task_status() -> TaskStatus {
+    TASK_MANAGER.get_task_status()
+}
+
+/// Increment syscall count for the given id, by one
+pub fn inc_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.inc_syscall_times(syscall_id);
 }
