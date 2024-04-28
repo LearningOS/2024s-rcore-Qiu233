@@ -274,3 +274,35 @@ impl Iterator for UserBufferIterator {
         }
     }
 }
+
+impl UserBufferIterator {
+    /// Copy from a pointer as many bytes as size of type parameter `T`.<br/>
+    /// Will advance the iterator by copied length.<br/>
+    /// Number of copied bytes are returned.
+    pub fn copy_from<T>(&mut self, valref: &T) -> usize {
+        let ptr = valref as *const T as *const u8;
+        let size = core::mem::size_of::<T>();
+        for i in 0..size {
+            if let Some(inner) = self.next() {
+                unsafe {
+                    *inner = *(ptr.wrapping_add(i));
+                }
+            } else {
+                return i;
+            }
+        }
+        return size;
+    }
+}
+
+impl UserBuffer {
+    /// Create from pointer of user space
+    pub fn from_mut_ptr<T>(token: usize, user_ptr: *mut T) -> Self {
+        Self::new(translated_byte_buffer(token, user_ptr as *const u8, core::mem::size_of::<T>()))
+    }
+    /// Copy from kernel space, to the start of user buffer.
+    pub fn copy_from<T>(self, valref: &T) {
+        let bytes = self.into_iter().copy_from(valref);
+        assert!(bytes == core::mem::size_of::<T>());
+    }
+}

@@ -2,18 +2,20 @@
 
 use super::id::RecycleAllocator;
 use super::manager::insert_into_pid2process;
-use super::TaskControlBlock;
+use super::{current_task, TaskControlBlock};
 use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
 use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::sync::atomic::AtomicUsize;
 
 /// Process Control Block
 pub struct ProcessControlBlock {
@@ -49,6 +51,15 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+
+    res_lock: AtomicUsize,
+    mutex_alloc: BTreeMap<(usize, usize), usize>,
+
+    pub sem_alloc: Vec<Vec<usize>>,
+    pub sem_q: Vec<Vec<usize>>,
+    pub sem_avail: Vec<usize>,
+    // sem_needed: BTreeMap<(usize, usize), usize>
+    
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +130,11 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    res_lock: AtomicUsize::new(0),
+                    mutex_alloc: BTreeMap::new(),
+                    sem_alloc: Vec::new(),
+                    sem_q: Vec::new(),
+                    sem_avail: Vec::new(),
                 })
             },
         });
@@ -245,6 +261,11 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    res_lock: AtomicUsize::new(0),
+                    mutex_alloc: BTreeMap::new(),
+                    sem_alloc: Vec::new(),
+                    sem_q: Vec::new(),
+                    sem_avail: Vec::new(),
                 })
             },
         });
@@ -281,5 +302,149 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+}
+
+
+impl ProcessControlBlockInner {
+
+
+    pub fn mutex_unlock(&mut self, id: usize) {
+        while self.res_lock.compare_exchange(0, 1, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {}
+
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        *self.mutex_alloc.entry((tid, id)).or_default() = 0;
+
+        self.res_lock.store(0, core::sync::atomic::Ordering::SeqCst);
+        
+    }
+
+    /// check whether a mutex can be acquired
+    pub fn mutex_lock(&mut self, id: usize) -> bool {
+        while self.res_lock.compare_exchange(0, 1, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {}
+        let mut need = BTreeMap::new();
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        need.insert((tid, id), 1);
+        let mut avai: BTreeMap<usize,usize> = BTreeMap::new();
+        let q = avai.entry(id).or_insert(1); // default 1 for mutex
+        for i in 0..self.tasks.len() {
+            if self.tasks[i].is_some() {
+                let r = self.mutex_alloc.entry((i, id)).or_default();
+                *q -= *r;
+            }
+        }
+        let mut work = avai;
+        let mut finish: BTreeMap<usize, bool> = BTreeMap::new();
+
+        'outer: loop {
+            for i in 0..self.tasks.len() {
+                if self.tasks[i].is_none() {
+                    continue;
+                }
+                finish.entry(i).or_default();
+                need.entry((i, id)).or_default();
+                if !finish.get(&i).unwrap() && need.get(&(i, id)).unwrap() <= work.get(&id).unwrap() {
+                    *work.get_mut(&id).unwrap() += *self.mutex_alloc.entry((i, id)).or_default();
+                    finish.insert(i, true);
+                }
+                else {
+                    break 'outer;
+                }
+            }
+        }
+        let result = if finish.into_iter().all(|x|x.1) {
+            *self.mutex_alloc.get_mut(&(tid, id)).unwrap() += 1;
+            true
+        } else {
+            false
+        };
+        self.res_lock.store(0, core::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    fn all_zero(v: &Vec<usize>) -> bool {
+        v.iter().all(|x|*x == 0)
+    }
+
+    fn le_vec(v1: &Vec<usize>, v2: &Vec<usize>) -> bool {
+        assert!(v1.len() == v2.len());
+        v1.iter().zip(v2.iter()).all(|(x,y)|*x<=*y)
+    }
+
+    fn add_to(dst: &mut Vec<usize>, src: &Vec<usize>) {
+        assert!(dst.len() == src.len());
+        dst.iter_mut().zip(src.iter()).for_each(|(x,y)|*x += *y);
+    }
+
+    pub fn prepare_sem_state(&mut self, num_tid: usize, num_sid: usize) {
+        while self.sem_alloc.len() < num_tid {
+            self.sem_alloc.push(Vec::new());
+        }
+        while self.sem_q.len() < num_tid {
+            self.sem_q.push(Vec::new());
+        }
+        for i in 0..num_tid {
+            while self.sem_alloc[i].len() < num_sid {
+                self.sem_alloc[i].push(0);
+            }
+            while self.sem_q[i].len() < num_sid {
+                self.sem_q[i].push(0);
+            }
+        }
+    }
+
+    pub fn release_all_sem(&mut self, tid: usize) {
+        Self::add_to(&mut self.sem_avail, &self.sem_alloc[tid]);
+        self.sem_alloc[tid].iter_mut().enumerate().for_each(|(sid, x)|{
+            while *x > 0 {
+                self.semaphore_list[sid].as_ref().unwrap().up();
+                *x -= 1;
+            }
+        });
+    }
+
+    pub fn sem_has_deadlock(&mut self) -> bool {
+        let num_threads = self.tasks.len();
+        let num_sem = self.semaphore_list.len();
+        self.prepare_sem_state(num_threads, num_sem);
+        let q = &mut self.sem_q;
+        let alloc = &mut self.sem_alloc;
+        let avail = &self.sem_avail;
+        let mut finish = vec![false; num_threads];
+        for i in 0..num_threads {
+            if Self::all_zero(&alloc[i]) {
+                finish[i] = true;
+            }
+        }
+        #[allow(non_snake_case)]
+        let mut W = avail.clone();
+        loop {
+            let mut found = None;
+            for i in 0..num_threads {
+                let cond1 = !finish[i];
+                let cond2 = Self::le_vec(&q[i], &W);
+                if cond1 && cond2 {
+                    finish[i] = true;
+                    Self::add_to(&mut W, &alloc[i]);
+                    found = Some(i);
+                    break;
+                }
+            }
+            if found.is_none() {
+                break;
+            }
+        }
+        // !finish.into_iter().all(|x|x)
+        let deadlock = !finish.iter().all(|x|*x);
+
+        if deadlock {
+            for tid in finish.iter().enumerate().filter(|x|!*x.1).map(|x|x.0) {
+                for sid in q[tid].iter() {
+                    self.semaphore_list[*sid].as_ref().unwrap().up_task(tid); // up all, but in our case there can only be one awaited
+                }
+            }
+        }
+
+        deadlock
     }
 }

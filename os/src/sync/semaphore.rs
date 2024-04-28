@@ -29,6 +29,20 @@ impl Semaphore {
         }
     }
 
+    /// up the semaphore by removing the specified task
+    pub fn up_task(&self, tid: usize) -> bool { // tid only in one process
+        let mut inner = self.inner.exclusive_access();
+        if let Some(pos) = inner.wait_queue.iter().position(|x|x.inner_exclusive_access().res.as_ref().unwrap().tid == tid) {
+            inner.count += 1;
+            let task = inner.wait_queue.remove(pos).unwrap();
+            task.inner_exclusive_access().deadlock = true;
+            wakeup_task(task);
+            true
+        } else {
+            false
+        }
+    }
+
     /// up operation of semaphore
     pub fn up(&self) {
         trace!("kernel: Semaphore::up");
@@ -41,8 +55,9 @@ impl Semaphore {
         }
     }
 
-    /// down operation of semaphore
-    pub fn down(&self) {
+    /// down operation of semaphore, 
+    /// returns false if the task should be exited due to deadlock detected
+    pub fn down(&self) -> bool {
         trace!("kernel: Semaphore::down");
         let mut inner = self.inner.exclusive_access();
         inner.count -= 1;
@@ -50,6 +65,9 @@ impl Semaphore {
             inner.wait_queue.push_back(current_task().unwrap());
             drop(inner);
             block_current_and_run_next();
+            !current_task().unwrap().inner_exclusive_access().deadlock
+        } else {
+            true // no deadlock in current state
         }
     }
 }
