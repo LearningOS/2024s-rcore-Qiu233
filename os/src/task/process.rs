@@ -52,13 +52,15 @@ pub struct ProcessControlBlockInner {
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
 
+    pub deadlock_detection: bool,
+
     res_lock: AtomicUsize,
     mutex_alloc: BTreeMap<(usize, usize), usize>,
 
     pub sem_alloc: Vec<Vec<usize>>,
     pub sem_q: Vec<Vec<usize>>,
     pub sem_avail: Vec<usize>,
-    // sem_needed: BTreeMap<(usize, usize), usize>
+    
     
 }
 
@@ -130,6 +132,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detection: false,
                     res_lock: AtomicUsize::new(0),
                     mutex_alloc: BTreeMap::new(),
                     sem_alloc: Vec::new(),
@@ -261,6 +264,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detection: false,
                     res_lock: AtomicUsize::new(0),
                     mutex_alloc: BTreeMap::new(),
                     sem_alloc: Vec::new(),
@@ -404,6 +408,9 @@ impl ProcessControlBlockInner {
     }
 
     pub fn sem_has_deadlock(&mut self) -> bool {
+        if !self.deadlock_detection {
+            return false;
+        }
         let num_threads = self.tasks.len();
         let num_sem = self.semaphore_list.len();
         self.prepare_sem_state(num_threads, num_sem);
