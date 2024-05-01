@@ -1,5 +1,6 @@
 //! Implementation of  [`ProcessControlBlock`]
 
+use super::deadlock::DeadlockDetection;
 use super::id::RecycleAllocator;
 use super::manager::insert_into_pid2process;
 use super::{current_task, TaskControlBlock};
@@ -47,8 +48,8 @@ pub struct ProcessControlBlockInner {
     pub task_res_allocator: RecycleAllocator,
     /// mutex list
     pub mutex_list: Vec<Option<Arc<dyn Mutex>>>,
-    /// semaphore list
-    pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
+    // /// semaphore list
+    // pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
 
@@ -57,10 +58,7 @@ pub struct ProcessControlBlockInner {
     res_lock: AtomicUsize,
     mutex_alloc: BTreeMap<(usize, usize), usize>,
 
-    pub sem_alloc: Vec<Vec<usize>>,
-    pub sem_q: Vec<Vec<usize>>,
-    pub sem_avail: Vec<usize>,
-    
+    pub sem_lock: DeadlockDetection<Semaphore>
     
 }
 
@@ -81,7 +79,9 @@ impl ProcessControlBlockInner {
     }
     /// allocate a new task id
     pub fn alloc_tid(&mut self) -> usize {
-        self.task_res_allocator.alloc()
+        let id = self.task_res_allocator.alloc();
+        self.sem_lock.num_threads = self.sem_lock.num_threads.max(id + 1);
+        id
     }
     /// deallocate a task id
     pub fn dealloc_tid(&mut self, tid: usize) {
@@ -130,14 +130,11 @@ impl ProcessControlBlock {
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     mutex_list: Vec::new(),
-                    semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
                     deadlock_detection: false,
                     res_lock: AtomicUsize::new(0),
                     mutex_alloc: BTreeMap::new(),
-                    sem_alloc: Vec::new(),
-                    sem_q: Vec::new(),
-                    sem_avail: Vec::new(),
+                    sem_lock: DeadlockDetection::new(Vec::new(), 0)
                 })
             },
         });
@@ -262,14 +259,11 @@ impl ProcessControlBlock {
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     mutex_list: Vec::new(),
-                    semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
                     deadlock_detection: false,
                     res_lock: AtomicUsize::new(0),
                     mutex_alloc: BTreeMap::new(),
-                    sem_alloc: Vec::new(),
-                    sem_q: Vec::new(),
-                    sem_avail: Vec::new(),
+                    sem_lock: DeadlockDetection::new(Vec::new(), 0)
                 })
             },
         });
@@ -366,92 +360,4 @@ impl ProcessControlBlockInner {
         result
     }
 
-    fn all_zero(v: &Vec<usize>) -> bool {
-        v.iter().all(|x|*x == 0)
-    }
-
-    fn le_vec(v1: &Vec<usize>, v2: &Vec<usize>) -> bool {
-        assert!(v1.len() == v2.len());
-        v1.iter().zip(v2.iter()).all(|(x,y)|*x<=*y)
-    }
-
-    fn add_to(dst: &mut Vec<usize>, src: &Vec<usize>) {
-        assert!(dst.len() == src.len());
-        dst.iter_mut().zip(src.iter()).for_each(|(x,y)|*x += *y);
-    }
-
-    pub fn prepare_sem_state(&mut self, num_tid: usize, num_sid: usize) {
-        while self.sem_alloc.len() < num_tid {
-            self.sem_alloc.push(Vec::new());
-        }
-        while self.sem_q.len() < num_tid {
-            self.sem_q.push(Vec::new());
-        }
-        for i in 0..num_tid {
-            while self.sem_alloc[i].len() < num_sid {
-                self.sem_alloc[i].push(0);
-            }
-            while self.sem_q[i].len() < num_sid {
-                self.sem_q[i].push(0);
-            }
-        }
-    }
-
-    pub fn release_all_sem(&mut self, tid: usize) {
-        Self::add_to(&mut self.sem_avail, &self.sem_alloc[tid]);
-        self.sem_alloc[tid].iter_mut().enumerate().for_each(|(sid, x)|{
-            while *x > 0 {
-                self.semaphore_list[sid].as_ref().unwrap().up();
-                *x -= 1;
-            }
-        });
-    }
-
-    pub fn sem_has_deadlock(&mut self) -> bool {
-        if !self.deadlock_detection {
-            return false;
-        }
-        let num_threads = self.tasks.len();
-        let num_sem = self.semaphore_list.len();
-        self.prepare_sem_state(num_threads, num_sem);
-        let q = &mut self.sem_q;
-        let alloc = &mut self.sem_alloc;
-        let avail = &self.sem_avail;
-        let mut finish = vec![false; num_threads];
-        for i in 0..num_threads {
-            if Self::all_zero(&alloc[i]) {
-                finish[i] = true;
-            }
-        }
-        #[allow(non_snake_case)]
-        let mut W = avail.clone();
-        loop {
-            let mut found = None;
-            for i in 0..num_threads {
-                let cond1 = !finish[i];
-                let cond2 = Self::le_vec(&q[i], &W);
-                if cond1 && cond2 {
-                    finish[i] = true;
-                    Self::add_to(&mut W, &alloc[i]);
-                    found = Some(i);
-                    break;
-                }
-            }
-            if found.is_none() {
-                break;
-            }
-        }
-        // !finish.into_iter().all(|x|x)
-        let deadlock = !finish.iter().all(|x|*x);
-
-        if deadlock {
-            for tid in finish.iter().enumerate().filter(|x|!*x.1).map(|x|x.0) {
-                for sid in q[tid].iter() {
-                    self.semaphore_list[*sid].as_ref().unwrap().up_task(tid); // up all, but in our case there can only be one awaited
-                }
-            }
-        }
-
-        deadlock
-    }
 }

@@ -29,20 +29,6 @@ impl Semaphore {
         }
     }
 
-    /// up the semaphore by removing the specified task
-    pub fn up_task(&self, tid: usize) -> bool { // tid only in one process
-        let mut inner = self.inner.exclusive_access();
-        if let Some(pos) = inner.wait_queue.iter().position(|x|x.inner_exclusive_access().res.as_ref().unwrap().tid == tid) {
-            inner.count += 1;
-            let task = inner.wait_queue.remove(pos).unwrap();
-            task.inner_exclusive_access().deadlock = true;
-            wakeup_task(task);
-            true
-        } else {
-            false
-        }
-    }
-
     /// up operation of semaphore
     pub fn up(&self) {
         trace!("kernel: Semaphore::up");
