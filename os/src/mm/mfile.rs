@@ -8,6 +8,8 @@ use easy_fs::Inode;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
+use crate::config::PAGE_SIZE;
+
 use super::{frame_alloc, page_table::PTEFlags, FrameTracker, PageTableEntry, PhysPageNum};
 
 
@@ -181,28 +183,43 @@ impl MFileManager {
             *pte = PageTableEntry::new(ppn, flags);
         }
     }
-}
 
-pub struct MFileHandle<'a> {
-    pte: &'a mut PageTableEntry,
-}
-
-impl<'a> Drop for MFileHandle<'a> {
-    fn drop(&mut self) {
-        MFILE_MANAGER.lock().unmap(self.pte as *mut PageTableEntry);
+    fn get_file_pos(&self, pte: *mut PageTableEntry) -> FilePos {
+        self.map.get(&pte).unwrap().pos.clone()
     }
 }
 
-impl<'a> MFileHandle<'a> {
+pub struct MFileHandle {
+    pte: *mut PageTableEntry,
+}
+
+impl<'a> Drop for MFileHandle {
+    fn drop(&mut self) {
+        MFILE_MANAGER.lock().unmap(self.pte);
+    }
+}
+
+impl MFileHandle {
     /// Create a file mapping handle, which on drop will unmap itself.
-    pub fn map(pte: &'a mut PageTableEntry, inode: Arc<Inode>, offset: usize) -> Self {
-        MFILE_MANAGER.lock().map(pte as *mut PageTableEntry, inode, offset);
+    pub fn map(pte: *mut PageTableEntry, inode: Arc<Inode>, offset: usize) -> Self {
+        assert!(offset % PAGE_SIZE == 0);
+        MFILE_MANAGER.lock().map(pte, inode, offset);
         Self {
             pte,
         }
     }
     /// This function is intended to be called on every individual page fault of different processes.
-    pub fn load(&mut self, flags: PTEFlags) {
-        MFILE_MANAGER.lock().load(self.pte as *mut PageTableEntry, flags);
+    pub fn load(&self, flags: PTEFlags) {
+        MFILE_MANAGER.lock().load(self.pte, flags);
+    }
+
+    /// Share fully the file mapping.
+    pub fn share_fully(&self, other: *mut PageTableEntry) -> Self {
+        let lock = MFILE_MANAGER.lock();
+        let pos = lock.get_file_pos(self.pte);
+        MFILE_MANAGER.lock().map(other, pos.inode, pos.offset);
+        Self {
+            pte: other
+        }
     }
 }

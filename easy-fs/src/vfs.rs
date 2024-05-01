@@ -14,6 +14,13 @@ pub struct Inode {
     block_device: Arc<dyn BlockDevice>,
 }
 
+impl PartialEq for Inode {
+    fn eq(&self, other: &Self) -> bool {
+        // TODO: how about device id?
+        self.get_inode_id() == other.get_inode_id()
+    }
+}
+
 impl Inode {
     /// get inode id
     pub fn get_inode_id(&self) -> u32 {

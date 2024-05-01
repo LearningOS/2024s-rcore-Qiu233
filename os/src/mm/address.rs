@@ -247,9 +247,9 @@ where
     pub fn is_empty(&self) -> bool {
         self.l >= self.r
     }
-    // pub fn contains(&self, v: &T) -> bool {
-    //     self.l <= *v && *v < self.r
-    // }
+    pub fn contains(&self, v: &T) -> bool {
+        self.l <= *v && *v < self.r
+    }
     pub fn intersection(&self, other: &Self) -> Self {
         let maxl = if other.l < self.l {self.l} else {other.l};
         let minr = if other.r < self.r {other.r} else {self.r};

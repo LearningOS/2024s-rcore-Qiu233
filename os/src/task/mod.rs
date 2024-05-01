@@ -141,5 +141,5 @@ pub fn add_initproc() {
 
 /// Try to own a shared page which contains the specified virtual address
 pub fn try_to_own_shared(va: usize) -> bool {
-    current_task().unwrap().inner_exclusive_access().memory_set.to_owned(VirtAddr::from(va).floor())
+    current_task().unwrap().inner_exclusive_access().memory_set.cown(VirtAddr::from(va).floor())
 }

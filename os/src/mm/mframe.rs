@@ -147,57 +147,57 @@ lazy_static! {
     static ref MFRAME_MANAGER: Mutex<MFrameManager> = Mutex::new(MFrameManager::default());
 }
 
-pub struct MFrameHandle<'a> {
-    pte: &'a mut PageTableEntry,
+pub struct MFrameHandle {
+    pte: *mut PageTableEntry,
 }
 
-impl<'a> Drop for MFrameHandle<'a> {
+impl Drop for MFrameHandle {
     fn drop(&mut self) {
         MFRAME_MANAGER.lock().unmap(self.pte as *mut PageTableEntry);
     }
 }
 
-impl<'a> MFrameHandle<'a> {
-    pub fn map_lazy(pte: &'a mut PageTableEntry) -> Self {
+impl MFrameHandle {
+    pub fn map_lazy(pte: *mut PageTableEntry) -> Self {
         MFRAME_MANAGER.lock().map_lazy(pte);
         Self {
             pte
         }
     }
-    pub fn map_strict(pte: &'a mut PageTableEntry, flags: PTEFlags) -> Self {
+    pub fn map_strict(pte: *mut PageTableEntry, flags: PTEFlags) -> Self {
         MFRAME_MANAGER.lock().map_strict(pte, flags);
         Self {
             pte
         }
     }
-    pub fn load(&mut self, flags: PTEFlags) {
-        MFRAME_MANAGER.lock().load(self.pte as *mut PageTableEntry, flags);
+    pub fn load(&self, flags: PTEFlags) {
+        MFRAME_MANAGER.lock().load(self.pte, flags);
     }
-    pub fn cown(&mut self) {
-        MFRAME_MANAGER.lock().cown(self.pte as *mut PageTableEntry);
+    pub fn cown(&self) {
+        MFRAME_MANAGER.lock().cown(self.pte);
     }
-    pub fn share_cow<'b>(&mut self, other: &'b mut PageTableEntry) -> MFrameHandle<'b> {
-        MFRAME_MANAGER.lock().share_cow(self.pte as *mut PageTableEntry, other as *mut PageTableEntry);
+    pub fn share_cow(&self, other: *mut PageTableEntry) -> MFrameHandle {
+        MFRAME_MANAGER.lock().share_cow(self.pte, other);
         MFrameHandle {
             pte: other
         }
     }
     pub fn executable(&self) -> bool {
-        self.pte.executable()
+        unsafe { self.pte.as_ref().unwrap().executable() }
     }
     pub fn writable(&self) -> bool {
-        self.pte.writable()
+        unsafe { self.pte.as_ref().unwrap().writable() }
     }
     pub fn readable(&self) -> bool {
-        self.pte.readable()
+        unsafe { self.pte.as_ref().unwrap().readable() }
     }
     pub fn is_lazy(&self) -> bool {
-        MFRAME_MANAGER.lock().is_lazy(self.pte as *const PageTableEntry as *mut PageTableEntry)
+        MFRAME_MANAGER.lock().is_lazy(self.pte)
     }
     pub fn is_owned(&self) -> bool {
-        MFRAME_MANAGER.lock().is_owned(self.pte as *const PageTableEntry as *mut PageTableEntry)
+        MFRAME_MANAGER.lock().is_owned(self.pte)
     }
     pub fn is_cow(&self) -> bool {
-        MFRAME_MANAGER.lock().is_cow(self.pte as *const PageTableEntry as *mut PageTableEntry)
+        MFRAME_MANAGER.lock().is_cow(self.pte)
     }
 }
