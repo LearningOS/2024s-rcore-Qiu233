@@ -159,8 +159,7 @@ impl PageTable {
     }
     /// Supress writability for the specified mapping
     pub fn suppress_writability(&mut self, vpn: VirtPageNum) {
-        let pte = self.find_pte(vpn).unwrap();
-        pte.bits.set_bit(2, false);
+        self.find_pte(vpn).unwrap().suppress_writability();
     }
 }
 
@@ -313,5 +312,20 @@ impl UserBuffer {
     pub fn copy_from<T>(self, valref: &T) {
         let bytes = self.into_iter().copy_from(valref);
         assert!(bytes == core::mem::size_of::<T>());
+    }
+}
+
+impl PageTableEntry {
+    /// invalidate the pte
+    pub fn invalidate(&mut self) {
+        self.bits.set_bit(0, false);
+    }
+    /// suppress writability of the pte
+    pub fn suppress_writability(&mut self) {
+        self.bits.set_bit(2, false);
+    }
+    /// revive writability of the pte
+    pub fn revive_writability(&mut self) {
+        self.bits.set_bit(2, true);
     }
 }
