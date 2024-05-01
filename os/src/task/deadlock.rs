@@ -4,12 +4,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::vec;
 
-use crate::sync::Semaphore;
+use crate::sync::{Mutex, Semaphore};
 
 
 pub struct DeadlockDetection<T: LockRelease> {
-    pub num_threads: usize,
-    pub locks: Vec<Option<Arc<T>>>,
+    pub locks: Vec<Option<T>>,
     pub alloc: Vec<Vec<usize>>,
     pub q: Vec<Vec<usize>>,
     pub avail: Vec<usize>,
@@ -21,9 +20,8 @@ pub trait LockRelease {
 
 
 impl<T: LockRelease> DeadlockDetection<T> {
-    pub fn new(locks: Vec<Option<Arc<T>>>, num_threads: usize) -> Self {
+    pub fn new(locks: Vec<Option<T>>) -> Self {
         Self {
-            num_threads,
             locks,
             alloc: Vec::new(),
             q: Vec::new(),
@@ -96,7 +94,7 @@ impl<T: LockRelease> DeadlockDetection<T> {
 
     /// detect deadlock by given environment
     pub fn has_deadlock(&mut self) -> bool {
-        let num_threads = self.num_threads;
+        let num_threads = self.alloc.len(); // `prepare_lock_state` will extend it to needed 
         let num_lock = self.locks.len();
         self.prepare_lock_state(num_threads, num_lock);
         let q = &mut self.q;
@@ -140,9 +138,15 @@ impl<T: LockRelease> DeadlockDetection<T> {
     }
 }
 
-impl LockRelease for Semaphore {
+impl LockRelease for Arc<Semaphore> {
     fn up(&self) {
-        self.up();
+        Semaphore::up(&self);
     }
 }
 
+
+impl LockRelease for Arc<dyn Mutex> {
+    fn up(&self) {
+        self.unlock();
+    }
+}

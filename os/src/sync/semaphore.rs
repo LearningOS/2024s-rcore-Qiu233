@@ -43,7 +43,7 @@ impl Semaphore {
 
     /// down operation of semaphore, 
     /// returns false if the task should be exited due to deadlock detected
-    pub fn down(&self) -> bool {
+    pub fn down(&self) {
         trace!("kernel: Semaphore::down");
         let mut inner = self.inner.exclusive_access();
         inner.count -= 1;
@@ -51,9 +51,6 @@ impl Semaphore {
             inner.wait_queue.push_back(current_task().unwrap());
             drop(inner);
             block_current_and_run_next();
-            !current_task().unwrap().inner_exclusive_access().deadlock
-        } else {
-            true // no deadlock in current state
         }
     }
 }
