@@ -22,7 +22,7 @@ mod switch;
 #[allow(rustdoc::private_intra_doc_links)]
 mod task;
 
-use crate::{fs::{open_file, OpenFlags}, mm::VirtAddr};
+use crate::{fs::{open_file, OpenFlags}, mm::PageFault};
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
@@ -139,7 +139,8 @@ pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
 
-/// Try to own a shared page which contains the specified virtual address
-pub fn try_to_own_shared(va: usize) -> bool {
-    current_task().unwrap().inner_exclusive_access().memory_set.cown(VirtAddr::from(va).floor())
+
+/// Handle page fault.
+pub fn handle_page_fault(page_fault: PageFault) -> isize {
+    current_task().unwrap().inner_exclusive_access().memory_set.page_fault(page_fault)
 }

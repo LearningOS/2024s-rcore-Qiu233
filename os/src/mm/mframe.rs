@@ -148,7 +148,7 @@ lazy_static! {
 }
 
 pub struct MFrameHandle {
-    pte: *mut PageTableEntry,
+    pub (super) pte: *mut PageTableEntry,
 }
 
 impl Drop for MFrameHandle {

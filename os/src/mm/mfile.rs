@@ -190,7 +190,7 @@ impl MFileManager {
 }
 
 pub struct MFileHandle {
-    pte: *mut PageTableEntry,
+    pub (super) pte: *mut PageTableEntry,
 }
 
 impl<'a> Drop for MFileHandle {
@@ -221,5 +221,9 @@ impl MFileHandle {
         Self {
             pte: other
         }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        MFILE_MANAGER.lock().map.get(&self.pte).unwrap().loaded()
     }
 }

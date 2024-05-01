@@ -390,6 +390,25 @@ impl MemorySet {
         }
         0
     }
+
+    /// Handle page fault.
+    /// 
+    /// ## Return value
+    /// *  0: successfully recovered from page fault
+    /// * -1: area not found
+    /// * -2: attempted to access non-user area
+    /// * -3: attempted to execute non-executable area
+    /// * -4: attempted to write to non-writable area
+    /// * -5: attempted to read from non-readable area
+    pub fn page_fault(&self, page_fault: PageFault) -> isize {
+        let vpn: VirtPageNum = page_fault.addr.into();
+        if let Some(area) = self.areas.iter().find(|x|x.vpn_range.contains(&vpn)) {
+            area.page_fault(page_fault)
+        } else {
+            -1 // no area containing the address
+        }
+    }
+
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -587,7 +606,7 @@ impl MapArea {
     }
     pub fn load_one(&self, vpn: VirtPageNum) {
         let flags: PTEFlags = self.map_perm.into();
-        self.data_frames.get(&vpn).unwrap().load(flags| PTEFlags::V);
+        self.data_frames.get(&vpn).unwrap().load(flags | PTEFlags::V);
     }
     pub fn load_all(&self) {
         for vpn in self.vpn_range {
@@ -610,6 +629,77 @@ impl MapArea {
             self.file_offset,
             Some(new_pages)
         )
+    }
+
+    pub fn page_fault(&self, page_fault: PageFault) -> isize {
+        // upon here, the area is present, we must look into the problem
+        // -1 is used by `MemorySet::page_fault` to represent area absence
+        let vpn = page_fault.addr.into();
+        let page = self.data_frames.get(&vpn).unwrap();
+        // perform definite permission checks
+        if !self.map_perm.contains(MapPermission::U) {
+            return -2; // cannot access non-user mappings
+        } else if page_fault.fault_type == PageFaultType::Instruction && !self.map_perm.contains(MapPermission::X) {
+            return -3; // no execution permission
+        } else if page_fault.fault_type == PageFaultType::Store && !self.map_perm.contains(MapPermission::W) {
+            return -4; // no writing permission
+        } else if page_fault.fault_type == PageFaultType::Load && !self.map_perm.contains(MapPermission::R) {
+            return -5; // no reading permission
+        }
+        // now we must also consider cases where permission bits are tweaked
+        match (page_fault.fault_type, self.map_type) {
+            // identity mapping's flags are never tweaked
+            // reaching here implies that PTE permission bits are invalid with respect to RISC-V standard
+            // in this case, kernel code must be checked
+            (_, MapType::Identity) => panic!("impossible"),
+            // FileShared is never tweaked, so the only valid route is to load
+            (_, MapType::FileShared) => {
+                if !page.present() {
+                    // FileShared is never tweaked
+                    self.load_one(vpn); // load for file
+                    0
+                } else {
+                    panic!("impossible");
+                }
+            }
+            // R and X bits are not tweaked for all Framed cases, so the only valid route is to load
+            (PageFaultType::Load, MapType::Framed) | (PageFaultType::Instruction, MapType::Framed) => {
+                if page.is_framed_lazy() {
+                    if !page.present() {
+                        self.load_one(vpn); // load for lazy frame
+                        0
+                    } else {
+                        // is lazy but already present
+                        // if this is the case, lazy load code must be checked
+                        panic!("impossible");
+                    }
+                } else {
+                    // there are two cases, both impossible:
+                    // Owned: permission bits are not tweaked
+                    // COW:   only writing permission is suppressed, while this variant is `Load`
+                    panic!("impossible");
+                }
+            }
+            (PageFaultType::Store, MapType::Framed) => {
+                if page.is_framed_lazy() {
+                    if !page.present() {
+                        self.load_one(vpn); // load for lazy frame
+                        0
+                    } else {
+                        // is lazy but already present
+                        // if this is the case, lazy load code must be checked
+                        panic!("impossible");
+                    }
+                } else if page.is_framed_cow() {
+                    // W bit is suppressed for COW mapping
+                    // copy on write
+                    page.cown();
+                    0
+                } else {
+                    panic!("impossible");
+                }
+            }
+        }
     }
 }
 
@@ -679,6 +769,36 @@ enum Page {
 unsafe impl Send for Page {}
 
 impl Page {
+
+    #[allow(unused)]
+    fn flags(&self) -> PTEFlags {
+        unsafe {
+            match self {
+                Page::Identity(id) => id.pte.as_ref().unwrap().flags(),
+                Page::Framed(framed) => framed.pte.as_ref().unwrap().flags(),
+                Page::FileShared(file) => file.pte.as_ref().unwrap().flags(),
+            }
+        }
+    }
+
+    /// aka `valid`
+    fn present(&self) -> bool {
+        self.flags().contains(PTEFlags::V)
+    }
+
+    fn is_framed_lazy(&self) -> bool {
+        match self {
+            Page::Identity(_) | Page::FileShared(_) => false,
+            Page::Framed(framed) => framed.is_lazy()
+        }
+    }
+    fn is_framed_cow(&self) -> bool {
+        match self {
+            Page::Identity(_) | Page::FileShared(_) => false,
+            Page::Framed(framed) => framed.is_cow()
+        }
+    }
+
     fn file_shared(pte: &mut PageTableEntry, inode: Arc<Inode>, offset: usize) -> Self {
         Self::FileShared(MFileHandle::map(pte as *mut PageTableEntry, inode, offset))
     }
@@ -756,6 +876,36 @@ impl MIdentityHandle {
         unsafe { *pte = PageTableEntry::new(PhysPageNum::from(vpn.0), flags) };
         Self {
             pte
+        }
+    }
+}
+
+/// Page fault type
+#[derive(PartialEq, Copy, Clone)]
+pub enum PageFaultType {
+    /// Load
+    Load,
+    /// Store
+    Store,
+    /// Instruction
+    Instruction,
+}
+
+
+/// Page fault info bundled for routing
+pub struct PageFault {
+    /// type of page fault
+    fault_type: PageFaultType,
+    /// virtual address which triggers this page fault
+    addr: VirtAddr
+}
+
+impl PageFault {
+    /// create a page fault
+    pub fn new(fault_type: PageFaultType, addr: VirtAddr) -> Self {
+        Self {
+            fault_type,
+            addr
         }
     }
 }

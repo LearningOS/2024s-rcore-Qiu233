@@ -15,9 +15,10 @@
 mod context;
 
 use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
+use crate::mm::{PageFault, PageFaultType};
 use crate::syscall::syscall;
 use crate::task::{
-    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, try_to_own_shared,
+    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, handle_page_fault,
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -73,9 +74,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::InstructionFault)
-        | Trap::Exception(Exception::InstructionPageFault)
-        | Trap::Exception(Exception::LoadFault)
-        | Trap::Exception(Exception::LoadPageFault) => {
+        | Trap::Exception(Exception::LoadFault) => {
             println!(
                 "[kernel] trap_handler:  {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
                 scause.cause(),
@@ -85,9 +84,19 @@ pub fn trap_handler() -> ! {
             // page fault exit code
             exit_current_and_run_next(-2);
         }
-        Trap::Exception(Exception::StorePageFault) => {
-            if try_to_own_shared(stval) {
-                trace!("[kernel] encountered StorePageFault but successfully owned the shared page");
+        Trap::Exception(Exception::InstructionPageFault)
+        | Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::LoadPageFault) => {
+            let pf_type = match scause.cause() {
+                Trap::Interrupt(_) => panic!("impossible"),
+                Trap::Exception(Exception::InstructionPageFault) => PageFaultType::Instruction,
+                Trap::Exception(Exception::StorePageFault) => PageFaultType::Store,
+                Trap::Exception(Exception::LoadPageFault) => PageFaultType::Load,
+                Trap::Exception(_) => panic!("impossible"),
+            };
+            let result = handle_page_fault(PageFault::new(pf_type, stval.into()));
+            if result == 0 {
+                trace!("[kernel] encountered {:?} but successfully owned the shared page", scause.cause());
             } else {
                 println!(
                     "[kernel] trap_handler:  {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
