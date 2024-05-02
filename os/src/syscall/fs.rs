@@ -1,4 +1,5 @@
 //! File and filesystem-related syscalls
+
 use crate::fs::{linkat, open_file, unlinkat, OpenFlags, Stat};
 use crate::mm::{translated_byte_buffer, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
@@ -8,6 +9,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((buf as usize).into()));
+    assert!(inner.memory_set.ensure((buf.wrapping_add(len - 1) as usize).into()));
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -29,6 +32,8 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((buf as usize).into()));
+    assert!(inner.memory_set.ensure((buf.wrapping_add(len - 1) as usize).into()));
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -48,11 +53,12 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 
 pub fn sys_open(path: *const u8, flags: u32) -> isize {
     trace!("kernel:pid[{}] sys_open", current_task().unwrap().pid.0);
-    let task = current_task().unwrap();
     let token = current_user_token();
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((path as usize).into()));
     let path = translated_str(token, path);
     if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
-        let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
         fd as isize
@@ -84,6 +90,8 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((st as usize).into()));
+    assert!(inner.memory_set.ensure((st.wrapping_add(1) as usize - 1).into()));
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -110,6 +118,10 @@ pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
         return -1;
     }
     let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((old_name as usize).into()));
+    assert!(inner.memory_set.ensure((new_name as usize).into()));
     let old_name = translated_str(token, old_name);
     let new_name = translated_str(token, new_name);
     linkat(old_name.as_str(), new_name.as_str())
@@ -122,6 +134,9 @@ pub fn sys_unlinkat(name: *const u8) -> isize {
         current_task().unwrap().pid.0
     );
     let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((name as usize).into()));
     let name = translated_str(token, name);
     unlinkat(name.as_str())
 }

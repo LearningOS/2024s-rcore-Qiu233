@@ -2,7 +2,7 @@
 //!
 
 use crate::{
-    config::{MAX_SYSCALL_NUM, PAGE_SIZE}, fs::{open_file, OpenFlags}, mm::{translated_refmut, translated_str, MapPermission, UserBuffer, VirtAddr}, task::{
+    config::{MAX_SYSCALL_NUM, PAGE_SIZE}, fs::{open_file, File, OpenFlags}, mm::{translated_refmut, translated_str, MapPermission, UserBuffer, VirtAddr}, task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, TaskStatus,
     }
@@ -61,11 +61,16 @@ pub fn sys_fork() -> isize {
 pub fn sys_exec(path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((path as usize).into()));
+    drop(inner);
+    drop(task);
     let path = translated_str(token, path);
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let all_data = app_inode.read_all();
+        // let all_data = app_inode.read_all();
         let task = current_task().unwrap();
-        task.exec(all_data.as_slice());
+        task.exec(app_inode.inode().unwrap().clone());
         0
     } else {
         -1
@@ -135,6 +140,12 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
         current_task().unwrap().pid.0
     );
     let us = crate::timer::get_time_us();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((ts as usize).into()));
+    assert!(inner.memory_set.ensure((ts.wrapping_add(1) as usize - 1).into()));
+    drop(inner);
+    drop(task);
     UserBuffer::from_mut_ptr(current_user_token(), ts).copy_from(&TimeVal {
         sec: us / 1_000_000,
         usec: us % 1_000_000,
@@ -159,6 +170,11 @@ pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
     info.time = crate::timer::get_time_ms() - task.get_dispatched_time();
     info.status = task.get_task_status();
     task.get_syscall_times(&mut info.syscall_times);
+    let inner = task.inner_exclusive_access();
+    assert!(inner.memory_set.ensure((ti as usize).into()));
+    assert!(inner.memory_set.ensure((ti.wrapping_add(1) as usize - 1).into()));
+    drop(inner);
+    drop(task);
     UserBuffer::from_mut_ptr(current_user_token(), ti).copy_from(info.as_ref());
     0
 }
@@ -238,11 +254,11 @@ pub fn sys_spawn(path: *const u8) -> isize {
         "kernel:pid[{}] sys_spawn",
         current_task().unwrap().pid.0
     );
+    assert!(current_task().unwrap().inner_exclusive_access().memory_set.ensure((path as usize).into()));
     let token = current_user_token();
     let path = translated_str(token, path);
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let all_data = app_inode.read_all();
-        let task = current_task().unwrap().spawn(&all_data);
+        let task = current_task().unwrap().spawn(app_inode.inode().unwrap().clone());
         let pid = task.pid.0;
         add_task(task);
         pid as isize

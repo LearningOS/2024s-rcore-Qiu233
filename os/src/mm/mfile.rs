@@ -239,9 +239,9 @@ impl MFileHandle {
 
     /// Share fully the file mapping.
     pub fn share_fully(&self, other: *mut PageTableEntry) -> Self {
-        let lock = MFILE_MANAGER.lock();
+        let mut lock = MFILE_MANAGER.lock();
         let pos = lock.get_file_pos(self.pte);
-        MFILE_MANAGER.lock().map(other, pos.inode, pos.offset);
+        lock.map(other, pos.inode, pos.offset);
         Self {
             pte: other
         }

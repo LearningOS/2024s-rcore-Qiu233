@@ -133,9 +133,9 @@ impl TaskControlBlock {
     /// Create a new process
     ///
     /// At present, it is only used for the creation of initproc
-    pub fn new(elf_data: &[u8]) -> Self {
+    pub fn new(elf_data: Arc<Inode>) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf_lazy(elf_data);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -186,14 +186,13 @@ impl TaskControlBlock {
     }
 
     /// Load a new elf to replace the original application address space and start execution
-    pub fn exec(&self, elf_data: &[u8]) {
+    pub fn exec(&self, elf_data: Arc<Inode>) {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf_lazy(elf_data);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
-
         // **** access current TCB exclusively
         let mut inner = self.inner_exclusive_access();
         // substitute memory_set
@@ -269,7 +268,7 @@ impl TaskControlBlock {
     }
 
     /// spawn a child process
-    pub fn spawn(&self, elf_data: &[u8]) -> Arc<Self> {
+    pub fn spawn(&self, elf_data: Arc<Inode>) -> Arc<Self> {
         let tcb = Arc::from(TaskControlBlock::new(elf_data));
         self.inner_exclusive_access().children.push(tcb.clone());
         tcb

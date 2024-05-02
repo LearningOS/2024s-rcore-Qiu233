@@ -22,7 +22,7 @@ mod switch;
 #[allow(rustdoc::private_intra_doc_links)]
 mod task;
 
-use crate::{fs::{open_file, OpenFlags}, mm::PageFault};
+use crate::{fs::{open_file, File, OpenFlags}, mm::PageFault};
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
@@ -129,8 +129,7 @@ lazy_static! {
     /// but we have user_shell, so we don't need to change it.
     pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({
         let inode = open_file("ch6b_initproc", OpenFlags::RDONLY).unwrap();
-        let v = inode.read_all();
-        TaskControlBlock::new(v.as_slice())
+        TaskControlBlock::new(inode.inode().unwrap().clone())
     });
 }
 

@@ -290,7 +290,11 @@ impl Inode {
     pub fn write_at_preserving_size(&self, offset: usize, buf: &[u8]) -> usize {
         let fs = self.fs.lock();
         let size = self.modify_disk_inode(|disk_inode| {
-            disk_inode.write_at(offset, buf, &self.block_device)
+            if offset < disk_inode.size as usize {
+                disk_inode.write_at(offset, buf, &self.block_device)
+            } else {
+                0
+            }
         });
         block_cache_sync_all();
         drop(fs);
