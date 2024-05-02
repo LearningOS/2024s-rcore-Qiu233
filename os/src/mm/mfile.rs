@@ -74,7 +74,7 @@ impl Eq for MFile {}
 
 impl FilePos {
     fn write(&self, buf: &[u8]) -> usize {
-        self.inode.write_at(self.offset, buf)
+        self.inode.write_at_preserving_size(self.offset, buf)
     }
     fn read(&self, buf: &mut [u8]) -> usize {
         self.inode.read_at(self.offset, buf)
@@ -86,13 +86,23 @@ impl MFile {
         self.frame.lock().is_some()
     }
     /// sync all data and then release the held ram frame
-    fn sync(&self) {
+    fn sync_and_solidify(&self) {
         let mut lock = self.frame.lock();
         match lock.take() {
             None => {}
             Some(frame) => {
                 self.pos.write(&frame.ppn.get_bytes_array());
                 drop(frame);
+            }
+        }
+    }
+    /// sync all data but keep the ram frame
+    fn sync(&self) {
+        let mut lock = self.frame.lock();
+        match &mut *lock {
+            None => {}
+            Some(frame) => {
+                self.pos.write(&frame.ppn.get_bytes_array());
             }
         }
     }
@@ -104,6 +114,7 @@ impl MFile {
             None => {
                 let frame = frame_alloc().unwrap(); // assume enough
                 let ppn = frame.ppn;
+                self.pos.read(ppn.get_bytes_array());
                 *lock = Some(frame);
                 ppn
             }
@@ -154,6 +165,7 @@ impl MFileManager {
         if let Some(file) = self.map.remove(&pte) {
             if file.loaded() {
                 unsafe { pte.as_mut().unwrap().invalidate() };
+                file.sync();
             }
             self.rmap.get_mut(&file.pos).unwrap().remove(&pte);
         }
@@ -166,7 +178,7 @@ impl MFileManager {
             .map(Arc::clone)
             .collect::<Vec<Arc<MFile>>>();
         for file in recycle.into_iter() {
-            file.sync(); // archive the data
+            file.sync_and_solidify(); // archive the data
             self.files.remove(&file);
         }
     }
@@ -202,7 +214,9 @@ pub struct MFileHandle {
 
 impl<'a> Drop for MFileHandle {
     fn drop(&mut self) {
-        MFILE_MANAGER.lock().unmap(self.pte);
+        let mut lock = MFILE_MANAGER.lock();
+        lock.unmap(self.pte);
+        lock.slim(); // TODO: is it enough? We need to synchronize block cache and mfile.
     }
 }
 

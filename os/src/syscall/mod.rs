@@ -62,7 +62,7 @@ use crate::task::current_task;
 use crate::fs::Stat;
 
 /// handle syscall exception with `syscall_id` and other arguments
-pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
+pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     current_task().unwrap().inc_syscall_times(syscall_id);
     match syscall_id {
         SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
@@ -80,7 +80,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_TASK_INFO => sys_task_info(args[0] as *mut TaskInfo),
-        SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2]),
+        SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] != 0),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_SBRK => sys_sbrk(args[0] as i32),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),

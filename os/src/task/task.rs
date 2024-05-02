@@ -10,6 +10,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use easy_fs::Inode;
 use spin::{Mutex, MutexGuard};
 
 /// Task control block structure
@@ -331,8 +332,11 @@ impl TaskControlBlock {
     }
 
     /// Map virtual page to physical page
-    pub fn mmap(&self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> isize {
-        self.inner_exclusive_access().memory_set.mmap(start_va, end_va, permission)
+    pub fn mmap(&self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission, 
+        file: Option<Arc<Inode>>,
+        offset: usize,
+        shared: bool) -> isize {
+        self.inner_exclusive_access().memory_set.mmap(start_va, end_va, permission, file, offset, shared)
     }
 
     /// Unmap virtual page

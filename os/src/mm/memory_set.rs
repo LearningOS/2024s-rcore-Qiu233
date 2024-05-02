@@ -5,6 +5,7 @@ use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::mm::frame_alloc;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -437,6 +438,9 @@ impl MemorySet {
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
+        file: Option<Arc<Inode>>,
+        offset: usize,
+        shared: bool
     ) -> isize  {
         let vpn_range = VPNRange::new(start_va.floor(), end_va.ceil());
         if vpn_range.into_iter().any(is_critical) {
@@ -445,7 +449,17 @@ impl MemorySet {
         if self.has_mapped(vpn_range) {
             return -1;
         }
-        let area = MapArea::map_framed(&self.page_table, start_va, end_va, permission);
+        // let area = MapArea::map_framed(&self.page_table, start_va, end_va, permission);
+        let area = match file {
+            None => MapArea::map_framed(&self.page_table, start_va, end_va, permission),
+            Some(file) => {
+                if shared {
+                    MapArea::map_file_shared(&self.page_table, start_va, end_va, permission, file, offset)
+                } else {
+                    MapArea::map_file_priv(&self.page_table, start_va, end_va, permission, file, offset)
+                }
+            }
+        };
         self.new_area(
             area,
         );
@@ -679,6 +693,16 @@ impl MapArea {
     ) -> Self {
         Self::map(page_table, start_va.floor(), end_va.ceil(), MapType::FilePriv, map_perm, Some(file), offset, None)
     }
+    fn map_file_shared(
+        page_table: &PageTable,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+        file: Arc<Inode>,
+        offset: usize
+    ) -> Self {
+        Self::map(page_table, start_va.floor(), end_va.ceil(), MapType::FileShared, map_perm, Some(file), offset, None)
+    }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         let original = core::mem::replace(self, unsafe { core::mem::zeroed() });
@@ -837,8 +861,8 @@ impl MapArea {
             }
             // FilePriv is only tweaked on W bit
             (PageFaultType::Store, MapType::FilePriv) => {
-                let cond2 = page.flags().contains(PTEFlags::W);
                 let cond1 = page.present();
+                let cond2 = page.flags().contains(PTEFlags::W);
                 match (cond1, cond2) {
                     (true, true) => panic!("impossible"),
                     (false, true) => panic!("impossible"),
@@ -1046,16 +1070,33 @@ impl Page {
     }
 
     fn fown(&mut self) -> bool {
+        unsafe {
+            let original = core::mem::replace(self, core::mem::zeroed());
+            match original.into_fown() {
+                Ok(page) => {
+                    core::mem::forget(core::mem::replace(self, page));
+                    true
+                }
+                Err(page) => {
+                    core::mem::forget(core::mem::replace(self, page));
+                    false
+                }
+            }
+        }
+    }
+
+    fn into_fown(self) -> Result<Self, Self> {
         match self {
-            Page::Identity(_) | Page::Framed(_) | Page::FileShared(_) => false,
-            Page::FilePriv(file) => {
+            Page::Identity(_) | Page::Framed(_) | Page::FileShared(_) => Err(self),
+            Page::FilePriv(ref file) => {
                 let mut flags = unsafe { file.pte.as_ref().unwrap().flags() };
                 assert!(!flags.contains(PTEFlags::W) && flags.contains(PTEFlags::V));
                 flags.set(PTEFlags::W, true);
-                let handle = MFrameHandle::map_strict(file.pte, flags);
-                handle.by_frame(|x|file.strict_dup(x));
-                *self = Page::Framed(handle);
-                true
+                let frame = frame_alloc().unwrap();
+                file.strict_dup(&frame);
+                let pte = file.pte;
+                drop(self); // unmapped
+                Ok(Page::Framed(MFrameHandle::map_owned(pte, frame, flags)))
             }
         }
     }

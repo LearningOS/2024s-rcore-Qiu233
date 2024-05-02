@@ -186,6 +186,14 @@ impl MFrameHandle {
             pte
         }
     }
+    pub fn map_owned(pte: *mut PageTableEntry, frame: FrameTracker, flags: PTEFlags) -> Self {
+        let mut lock = MFRAME_MANAGER.lock();
+        unsafe { *pte = PageTableEntry::new(frame.ppn, flags) };
+        assert!(lock.map.insert(pte, MFrame::Owned(frame)).is_none());
+        Self {
+            pte
+        }
+    }
     pub fn load(&self, flags: PTEFlags) {
         MFRAME_MANAGER.lock().load(self.pte, flags);
     }
@@ -221,15 +229,5 @@ impl MFrameHandle {
     }
     pub fn is_cow(&self) -> bool {
         MFRAME_MANAGER.lock().is_cow(self.pte)
-    }
-    /// `self` must be owned
-    pub fn by_frame(&self, work: impl Fn(&FrameTracker)) {
-        assert!(self.is_owned());
-        match MFRAME_MANAGER.lock().map.get(&self.pte).unwrap() {
-            MFrame::Owned(frame) => {
-                work(frame)
-            }
-            MFrame::COW(_) | MFrame::Lazy => panic!("impossible")
-        }
     }
 }

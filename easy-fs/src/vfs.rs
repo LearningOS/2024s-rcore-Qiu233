@@ -286,6 +286,16 @@ impl Inode {
         block_cache_sync_all();
         size
     }
+    /// Write data to current inode
+    pub fn write_at_preserving_size(&self, offset: usize, buf: &[u8]) -> usize {
+        let fs = self.fs.lock();
+        let size = self.modify_disk_inode(|disk_inode| {
+            disk_inode.write_at(offset, buf, &self.block_device)
+        });
+        block_cache_sync_all();
+        drop(fs);
+        size
+    }
     /// Clear the data in current inode
     pub fn clear(&self) {
         self.clear_internal(&mut self.fs.lock());

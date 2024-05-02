@@ -164,7 +164,10 @@ impl PageTable {
     }
     /// Forcibly create pte entry
     pub fn create_force<'a>(&'a self, vpn: VirtPageNum) -> &'a mut PageTableEntry {
-        self.find_pte_create(vpn).unwrap()
+        let pte = self.find_pte_create(vpn).unwrap();
+        assert!(!pte.is_valid());
+        *pte = PageTableEntry::empty(); // clear the flags
+        pte
     }
     /// Forcibly get or panic on failure
     pub fn get_force<'a>(&'a self, vpn: VirtPageNum) -> &'a mut PageTableEntry {

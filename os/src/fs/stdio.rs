@@ -1,4 +1,7 @@
 //!Stdin & Stdout
+use alloc::sync::Arc;
+use easy_fs::Inode;
+
 use super::File;
 use crate::mm::UserBuffer;
 use crate::sbi::console_getchar;
@@ -42,6 +45,9 @@ impl File for Stdin {
     fn stat(&self) -> Option<super::Stat> {
         None
     }
+    fn inode(&self) -> Option<Arc<Inode>> {
+        None
+    }
 }
 
 impl File for Stdout {
@@ -61,6 +67,9 @@ impl File for Stdout {
         user_buf.len()
     }
     fn stat(&self) -> Option<super::Stat> {
+        None
+    }
+    fn inode(&self) -> Option<Arc<Inode>> {
         None
     }
 }

@@ -17,6 +17,8 @@ pub trait File: Send + Sync {
     fn write(&self, buf: UserBuffer) -> usize;
     /// get file stat
     fn stat(&self) -> Option<Stat>;
+    /// get underlying inode if it's file
+    fn inode(&self) -> Option<Arc<Inode>>;
 }
 
 /// The stat of a inode
@@ -48,5 +50,7 @@ bitflags! {
     }
 }
 
+use alloc::sync::Arc;
+use easy_fs::Inode;
 pub use inode::{list_apps, open_file, linkat, unlinkat, OSInode, OpenFlags};
 pub use stdio::{Stdin, Stdout};

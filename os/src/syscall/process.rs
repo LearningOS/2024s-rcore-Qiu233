@@ -2,7 +2,7 @@
 //!
 
 use crate::{
-    config::MAX_SYSCALL_NUM, fs::{open_file, OpenFlags}, mm::{translated_refmut, translated_str, MapPermission, UserBuffer, VirtAddr}, task::{
+    config::{MAX_SYSCALL_NUM, PAGE_SIZE}, fs::{open_file, OpenFlags}, mm::{translated_refmut, translated_str, MapPermission, UserBuffer, VirtAddr}, task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, TaskStatus,
     }
@@ -164,11 +164,14 @@ pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, prot: usize, fd: usize, offset: usize, shared: bool) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap",
         current_task().unwrap().pid.0
     );
+    if offset % PAGE_SIZE != 0 {
+        return -1;
+    }
     if start % crate::config::PAGE_SIZE != 0 {
         return -1;
     }
@@ -178,7 +181,30 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     let start_va: VirtAddr = start.into();
     let end_va: VirtAddr = (start + len).into();
     let flags = (prot as u8) << 1;
-    current_task().unwrap().mmap(start_va, end_va, MapPermission::from_bits(flags).unwrap() | MapPermission::U)
+    if fd == 0 {
+        current_task().unwrap().mmap(start_va, end_va, MapPermission::from_bits(flags).unwrap() | MapPermission::U, None, 0, false)
+    } else {
+        let fd = {
+            let task = current_task().unwrap();
+            let inner = task.inner_exclusive_access();
+            let fd = inner.fd_table[fd].clone();
+            drop(inner);
+            // note: inner must be dropped explicitly here
+            // for unknown reason, when in fluent syntax, inner is not dropped,
+            // so the following mmap call would cause deadlock
+            fd
+        };
+        if let Some(fd) = fd {
+            let inode = fd.inode();
+            if inode.is_none() {
+                return -1;
+            }
+            let inode = inode.unwrap();
+            current_task().unwrap().mmap(start_va, end_va, MapPermission::from_bits(flags).unwrap() | MapPermission::U, Some(inode), offset, shared)
+        } else {
+            -1
+        }
+    }
 }
 
 /// YOUR JOB: Implement munmap.

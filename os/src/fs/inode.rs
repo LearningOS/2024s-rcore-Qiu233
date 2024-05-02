@@ -195,4 +195,7 @@ impl File for OSInode {
             pad: [0; 7]
         })
     }
+    fn inode(&self) -> Option<Arc<Inode>> {
+        Some(self.inner.lock().inode.clone())
+    }
 }
