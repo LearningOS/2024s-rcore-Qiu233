@@ -56,8 +56,7 @@ pub fn sys_open(path: *const u8, flags: u32) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    assert!(inner.memory_set.ensure((path as usize).into()));
-    let path = translated_str(token, path);
+    let path = translated_str(token, path, |x|assert!(inner.memory_set.ensure(x)));
     if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
@@ -120,10 +119,8 @@ pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
-    assert!(inner.memory_set.ensure((old_name as usize).into()));
-    assert!(inner.memory_set.ensure((new_name as usize).into()));
-    let old_name = translated_str(token, old_name);
-    let new_name = translated_str(token, new_name);
+    let old_name = translated_str(token, old_name, |x|assert!(inner.memory_set.ensure(x)));
+    let new_name = translated_str(token, new_name, |x|assert!(inner.memory_set.ensure(x)));
     linkat(old_name.as_str(), new_name.as_str())
 }
 
@@ -136,7 +133,6 @@ pub fn sys_unlinkat(name: *const u8) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
-    assert!(inner.memory_set.ensure((name as usize).into()));
-    let name = translated_str(token, name);
+    let name = translated_str(token, name, |x|assert!(inner.memory_set.ensure(x)));
     unlinkat(name.as_str())
 }

@@ -63,10 +63,9 @@ pub fn sys_exec(path: *const u8) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
-    assert!(inner.memory_set.ensure((path as usize).into()));
+    let path = translated_str(token, path, |x|assert!(inner.memory_set.ensure(x)));
     drop(inner);
     drop(task);
-    let path = translated_str(token, path);
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         // let all_data = app_inode.read_all();
         let task = current_task().unwrap();
@@ -254,9 +253,12 @@ pub fn sys_spawn(path: *const u8) -> isize {
         "kernel:pid[{}] sys_spawn",
         current_task().unwrap().pid.0
     );
-    assert!(current_task().unwrap().inner_exclusive_access().memory_set.ensure((path as usize).into()));
     let token = current_user_token();
-    let path = translated_str(token, path);
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let path = translated_str(token, path, |x|assert!(inner.memory_set.ensure(x)));
+    drop(inner);
+    drop(task);
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         let task = current_task().unwrap().spawn(app_inode.inode().unwrap().clone());
         let pid = task.pid.0;

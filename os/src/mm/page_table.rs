@@ -199,13 +199,15 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
 }
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
-pub fn translated_str(token: usize, ptr: *const u8) -> String {
+pub fn translated_str(token: usize, ptr: *const u8, ensure: impl Fn(VirtAddr)) -> String {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();
     let mut va = ptr as usize;
     loop {
+        let va_ = VirtAddr::from(va);
+        ensure(va_);
         let ch: u8 = *(page_table
-            .translate_va(VirtAddr::from(va))
+            .translate_va(va_)
             .unwrap()
             .get_mut());
         if ch == 0 {

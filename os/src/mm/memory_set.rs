@@ -300,7 +300,7 @@ impl MemorySet {
                     start_va, end_va,
                     map_perm,
                     inode.clone(), ph.offset() as usize);
-                map_area.load_all();
+                // map_area.load_all();
                 max_end_vpn = map_area.vpn_range.get_end();
                 memory_set.new_area(map_area);
             }
