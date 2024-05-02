@@ -106,11 +106,14 @@ impl MFile {
             }
         }
     }
-    /// load file into memory, does nothing if already loaded
+    /// load file into memory, re-read data if already loaded
     fn load(&self) -> PhysPageNum {
         let mut lock = self.frame.lock();
         match &*lock {
-            Some(frame) => frame.ppn,
+            Some(frame) => {
+                self.pos.read(frame.ppn.get_bytes_array());
+                frame.ppn
+            }
             None => {
                 let frame = frame_alloc().unwrap(); // assume enough
                 let ppn = frame.ppn;
@@ -216,7 +219,7 @@ impl<'a> Drop for MFileHandle {
     fn drop(&mut self) {
         let mut lock = MFILE_MANAGER.lock();
         lock.unmap(self.pte);
-        lock.slim(); // TODO: is it enough? We need to synchronize block cache and mfile.
+        lock.slim(); // TODO: can we call `slim` when it's really neccessary?
     }
 }
 
@@ -252,5 +255,20 @@ impl MFileHandle {
     pub fn strict_dup(&self, frame: &FrameTracker) {
         assert!(self.is_loaded()); // must be loaded before calling this
         MFILE_MANAGER.lock().strict_dup(self.pte, frame)
+    }
+}
+
+// DESIGN NOTE: We only synchronize file changes from block cache to mfile, by calling function in `OSInode::write`.
+// Since mfile use block cache to read/write data, so there's no need to sync from mfile to block cache.
+
+/// invalidate the mfile so it re-read data from disk, does nothing if not loaded
+pub fn mfile_invalidate(inode: usize, offset: usize) { // TODO: device id?
+    let lock = MFILE_MANAGER.lock();
+    if let Some(file) = lock.files.iter()
+        .find(|x|
+            x.loaded() 
+            && x.pos.inode.get_inode_id() as usize == inode 
+            && x.pos.offset == offset) {
+        file.load(); // re-read data
     }
 }

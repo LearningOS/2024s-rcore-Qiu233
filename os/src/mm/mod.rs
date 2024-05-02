@@ -24,6 +24,7 @@ pub use page_table::{
     translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
     PageTableEntry, UserBuffer, UserBufferIterator,
 };
+pub use mfile::mfile_invalidate;
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
