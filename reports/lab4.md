@@ -1,5 +1,6 @@
 # 实现功能
 
+## 必做题
 在`Inode`里面将direct数量减一，改成字段保存link数量，保持`Inode`长度不变。
 
 三个系统调用：
@@ -7,6 +8,20 @@
 * `unlinkat`：即删除entry，如果删除时inode的link数只有1，那么会删除inode。
 * `fstat`：只需要计算inode id，加上之前保存link数即可。
 
+## 选做题
+重写内存管理，实现Demand Paging，由于增加了`mmap`的参数，所以应该过不了CI，但本地改动lib.rs中mmap定义后，实测`ch6_usertest`可以过，所以实现并无问题，以下所有功能都已通过测试：
+1. 扩展`mmap`支持文件映射：
+    * 以shared模式映射文件(的页)，在进程结束(映射被释放)时、或munmap发生时会被写回文件(`msync`暂未实现)，进程之间可以用这种方式共享内存。
+    * shared映射不能使文件变大，内存区域超出文件大小的部分初始时全为0，这部分不会被写回文件。
+    * 以private模式映射文件(的页)，不会被写回文件，在内存发生写入时才会(COW)复制到新的Frame。
+    * 与block cache同步：`OSInode`被写入时会使`MFile`的映射页面无效化，使其从block cache中同步改动。由于`MFile`基于block cache实现，所以block cache无需反过来从`MFile`同步改动。
+    * shared和private模式都是lazy load，即页面真正被使用时才会分配Frame并加载，当文件页所有映射都被释放时，Frame也会被释放。
+2. 支持Demand Paging：ELF文件的LOAD部分以**private模式**映射，因此本身具有lazy load性质。此外这种策略允许同一个ELF文件的多个进程始终共享同一份只读区域，节省内存。
+3. Lazy内存分配：现在除了`TRAP_CONTEXT_BASE`和内核栈以外的所有Framed区域初始时都没有分配Frame，直到发生缺页中断时才会分配。
+4. fork的COW：
+    * fork得到的分支进程之间会共享页面，直到发生写入为止。
+    * 由于现在ELF文件以private模式映射，所以真正COW的页面只有用户栈、brk、mmap申请的非文件映射区域。
+    * 文件映射区域可以直接"复制"，因为内核保证每个不同的文件页最多只存在一个对应的Frame，不会浪费内存。
 
 # 问答作业
 1. root inode是根目录，类比linux的`/`。根目录损坏意味着损失所有下级目录及文件。
