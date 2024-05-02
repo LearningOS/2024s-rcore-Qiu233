@@ -86,7 +86,7 @@ debug: build
 		qemu-system-riscv64 -machine virt -smp 1 -nographic -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) -s -S \
 			-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
 			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 && \
-		tmux split-window -h "gdb-multiarch -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'" && \
+		tmux split-window -h "gdb-multiarch -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234' -ex 'set print asm-demangle'" && \
 		tmux -2 attach-session -d
 
 

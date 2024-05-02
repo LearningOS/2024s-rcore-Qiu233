@@ -9,7 +9,7 @@ use spin::Mutex;
 use super::{frame_alloc, page_table::PTEFlags, FrameTracker, PageTableEntry, PhysPageNum};
 
 
-// design note: We don't need to feature shared mapping here,
+// DESIGN NOTE: We don't need to feature shared mapping here,
 // because it's almost equivalent to mapping to the same file.
 // Also no need to cow share a Lazy mapping, as it's always initialized with zeros.
 
@@ -17,7 +17,7 @@ enum MFrame {
     /// not yet allocated
     Lazy,
     /// fully owned, with all possible permissions
-    Ownd(FrameTracker),
+    Owned(FrameTracker),
     /// shared until write, without write permission
     COW(Arc<FrameTracker>),
 }
@@ -38,7 +38,7 @@ impl MFrameManager {
     }
     fn is_owned(&self, pte: *mut PageTableEntry) -> bool {
         match self.map.get(&pte).unwrap() {
-            MFrame::Ownd(_) => true,
+            MFrame::Owned(_) => true,
             _ => false
         }
     }
@@ -51,7 +51,7 @@ impl MFrameManager {
     /// Track the pte, but not mapped.<br/>
     /// Will invalidate the passed pte.
     fn map_lazy(&mut self, pte: *mut PageTableEntry) {
-        self.map.insert(pte, MFrame::Lazy);
+        assert!(self.map.insert(pte, MFrame::Lazy).is_none());
         unsafe { pte.as_mut().unwrap().invalidate() };
     }
     /// map the pte immediately to an allocated frame
@@ -63,42 +63,40 @@ impl MFrameManager {
     fn load(&mut self, pte: *mut PageTableEntry, flags: PTEFlags) {
         let entry = self.map.get_mut(&pte).unwrap();
         match entry {
-            MFrame::Ownd(_) => {}
+            MFrame::Owned(_) => {}
             MFrame::COW(_) => panic!("cannot load a COW mapping"),
             MFrame::Lazy => {
                 let frame = frame_alloc().unwrap();
                 unsafe {
                     *pte = PageTableEntry::new(frame.ppn, flags);
                 }
-                *entry = MFrame::Ownd(frame);
+                *entry = MFrame::Owned(frame);
             }
         }
     }
     /// Own a COW mapping, thus is named `cown`.
     fn cown(&mut self, pte: *mut PageTableEntry) {
         let entry = self.map.get_mut(&pte).unwrap();
-        match entry {
+        match core::mem::replace(entry, MFrame::Lazy) {
             MFrame::Lazy => panic!("cannot own a lazy mapping"),
-            MFrame::Ownd(_) => {}
+            MFrame::Owned(frame) => *entry = MFrame::Owned(frame),
             MFrame::COW(shared) => {
                 let mut flags = unsafe { pte.as_mut().unwrap().flags() };
-                #[allow(invalid_value)]
-                match Arc::try_unwrap(unsafe { core::mem::replace(shared, core::mem::zeroed()) }) {
+                match Arc::try_unwrap(shared) {
                     Err(arc) => {
                         let frame = frame_alloc().unwrap();
                         frame.ppn.get_bytes_array().copy_from_slice(&arc.ppn.get_bytes_array());
                         unsafe {
                             *pte = PageTableEntry::new(frame.ppn, flags);
                             pte.as_mut().unwrap().revive_writability();
-                            core::mem::forget(core::mem::replace(shared, arc)); // forget the invalid value
                         }
-                        *entry = MFrame::Ownd(frame);
+                        *entry = MFrame::Owned(frame);
                     }
                     Ok(frame) => {
                         unsafe {
                             *pte = PageTableEntry::new(frame.ppn, flags);
                             pte.as_mut().unwrap().revive_writability();
-                            core::mem::forget(core::mem::replace(entry, MFrame::Ownd(frame))); // forget the invalid value
+                            *entry = MFrame::Owned(frame);
                         }
                     }
                 }
@@ -109,7 +107,7 @@ impl MFrameManager {
     fn unmap(&mut self, pte: *mut PageTableEntry) {
         match self.map.remove(&pte).expect("Cannot unmap a not tracked map") {
             MFrame::Lazy => {}
-            MFrame::Ownd(_) | MFrame::COW(_) => unsafe { pte.as_mut().unwrap().invalidate() },
+            MFrame::Owned(_) | MFrame::COW(_) => unsafe { pte.as_mut().unwrap().invalidate() },
         }
     }
     /// COW share the mapping of `pte_origin`.
@@ -117,9 +115,9 @@ impl MFrameManager {
         let entry = self.map.get_mut(&pte_origin).unwrap();
         match entry {
             MFrame::Lazy => {
-                self.map.insert(pte_borrow, MFrame::Lazy);
+                assert!(self.map.insert(pte_borrow, MFrame::Lazy).is_none());
             }
-            MFrame::Ownd(frame) => {
+            MFrame::Owned(frame) => {
                 unsafe {
                     let mut flags = pte_origin.as_ref().unwrap().flags();
                     flags.set(PTEFlags::W, false);
@@ -127,7 +125,7 @@ impl MFrameManager {
                     *pte_origin = PageTableEntry::new(shared.ppn, flags);
                     *pte_borrow = PageTableEntry::new(shared.ppn, flags);
                     core::mem::forget(core::mem::replace(entry, MFrame::COW(shared.clone()))); // forget the invalid value
-                    self.map.insert(pte_borrow, MFrame::COW(shared));
+                    assert!(self.map.insert(pte_borrow, MFrame::COW(shared)).is_none());
                 }
             }
             MFrame::COW(shared) => {
@@ -135,8 +133,26 @@ impl MFrameManager {
                     let mut flags = pte_origin.as_ref().unwrap().flags();
                     *pte_borrow = PageTableEntry::new(shared.ppn, flags);
                     let shared = shared.clone();
-                    self.map.insert(pte_borrow, MFrame::COW(shared));
+                    assert!(self.map.insert(pte_borrow, MFrame::COW(shared)).is_none());
                 }
+            }
+        }
+    }
+    fn strict_dup(&mut self, pte_origin: *mut PageTableEntry, pte_borrow: *mut PageTableEntry) {
+        let entry = self.map.get_mut(&pte_origin).unwrap();
+        match entry {
+            MFrame::Lazy | MFrame::COW(_) => {
+                panic!("Can only strictly duplicate an Owned mapping");
+            }
+            MFrame::Owned(frame) => {
+                let other = frame_alloc().unwrap();
+                let ppn = other.ppn;
+                ppn.get_bytes_array().copy_from_slice(&frame.ppn.get_bytes_array());
+                unsafe {
+                    let mut flags = pte_origin.as_ref().unwrap().flags();
+                    *pte_borrow = PageTableEntry::new(ppn, flags)
+                }
+                self.map.insert(pte_borrow, MFrame::Owned(other));
             }
         }
     }
@@ -178,6 +194,12 @@ impl MFrameHandle {
     }
     pub fn share_cow(&self, other: *mut PageTableEntry) -> MFrameHandle {
         MFRAME_MANAGER.lock().share_cow(self.pte, other);
+        MFrameHandle {
+            pte: other
+        }
+    }
+    pub fn strict_dup(&self, other: *mut PageTableEntry) -> MFrameHandle {
+        MFRAME_MANAGER.lock().strict_dup(self.pte, other);
         MFrameHandle {
             pte: other
         }

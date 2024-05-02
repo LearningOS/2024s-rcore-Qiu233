@@ -74,7 +74,7 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.lock().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
-    KERNEL_SPACE.lock().insert_framed_area(
+    KERNEL_SPACE.lock().insert_framed_area_strict(
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,

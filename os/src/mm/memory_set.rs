@@ -37,6 +37,16 @@ pub fn kernel_token() -> usize {
     KERNEL_SPACE.lock().token()
 }
 
+/// Gets whether the specified virtual page is critical and thus cannot be unmapped.
+fn is_critical(vpn: VirtPageNum) -> bool {
+    if vpn == VirtPageNum::from(VirtAddr::from(TRAMPOLINE)) {
+        return true;
+    } else if vpn == VirtPageNum::from(VirtAddr::from(TRAP_CONTEXT_BASE)) {
+        return true;
+    }
+    return false;
+}
+
 /// address space
 pub struct MemorySet {
     page_table: PageTable,
@@ -56,7 +66,7 @@ impl MemorySet {
         self.page_table.token()
     }
     /// Assume that no conflicts.
-    pub fn insert_framed_area(
+    pub fn insert_framed_area_strict(
         &mut self,
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -64,7 +74,7 @@ impl MemorySet {
     ) {
         self.new_area(
             MapArea::map_framed(
-                &self.page_table, start_va.floor(), end_va.ceil(), permission)
+                &self.page_table, start_va, end_va, permission).then_load_all()
         );
     }
     /// remove a area
@@ -141,6 +151,8 @@ impl MemorySet {
             ),
         );
         info!("mapping physical memory");
+        // this will take kernel heap space at least 8 Pages to store the `MIdentityHandle`s.
+        // TODO: make identity mappings sparse, or use super page for the contiguous ones to save kernel heap space
         memory_set.new_area(
             MapArea::map_identity(
                 &memory_set.page_table,
@@ -193,8 +205,8 @@ impl MemorySet {
                 }
                 let map_area = MapArea::map_framed(
                     &memory_set.page_table,
-                    // these addresses are guaranteed to be multiple of page size, according elf format
-                    start_va.floor(), end_va.ceil(),
+                    // these addresses are guaranteed to be multiple of page size, according to elf format
+                    start_va, end_va,
                     map_perm).then_load_all();
                 max_end_vpn = map_area.vpn_range.get_end();
                 map_area.copy_data(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize], &memory_set.page_table);
@@ -255,7 +267,12 @@ impl MemorySet {
         let mut memory_set = Self::new_bare();
         memory_set.map_trampoline();
         for area in self.areas.iter() {
-            memory_set.new_area(area.fork(&memory_set.page_table));
+            if area.vpn_range.into_iter().any(is_critical) {
+                // `TRAP_CONTEXT_BASE` must be copied immediately
+                memory_set.new_area(area.fork_strict(&memory_set.page_table));
+            } else {
+                memory_set.new_area(area.fork(&memory_set.page_table));
+            }
         }
         memory_set
     }
@@ -324,16 +341,6 @@ impl MemorySet {
         count != expected
     }
 
-    /// Gets whether the specified virtual page is critical and thus cannot be unmapped.
-    fn is_critical(vpn: VirtPageNum) -> bool {
-        if vpn == VirtPageNum::from(VirtAddr::from(TRAMPOLINE)) {
-            return true;
-        } else if vpn == VirtPageNum::from(VirtAddr::from(TRAP_CONTEXT_BASE)) {
-            return true;
-        }
-        return false;
-    }
-
     /// Try to map virtual address range, with memory not allocated until actual use.
     pub fn mmap(
         &mut self,
@@ -341,13 +348,14 @@ impl MemorySet {
         end_va: VirtAddr,
         permission: MapPermission,
     ) -> isize  {
-        let area = MapArea::map_framed(&self.page_table, start_va.floor(), end_va.ceil(), permission);
-        if area.vpn_range.into_iter().any(|x|Self::is_critical(x)) {
+        let vpn_range = VPNRange::new(start_va.floor(), end_va.ceil());
+        if vpn_range.into_iter().any(is_critical) {
             return -1;
         }
-        if self.has_mapped(area.vpn_range) {
+        if self.has_mapped(vpn_range) {
             return -1;
         }
+        let area = MapArea::map_framed(&self.page_table, start_va, end_va, permission);
         self.new_area(
             area,
         );
@@ -362,7 +370,7 @@ impl MemorySet {
         end_va: VirtAddr,
     ) -> isize  {
         let target_range = VPNRange::new(start_va.floor(), end_va.ceil());
-        if target_range.into_iter().any(|x|Self::is_critical(x)) {
+        if target_range.into_iter().any(is_critical) {
             return -1;
         }
         if self.has_unmapped(target_range) {
@@ -401,7 +409,7 @@ impl MemorySet {
     /// * -4: attempted to write to non-writable area
     /// * -5: attempted to read from non-readable area
     pub fn page_fault(&self, page_fault: PageFault) -> isize {
-        let vpn: VirtPageNum = page_fault.addr.into();
+        let vpn: VirtPageNum = page_fault.addr.floor();
         if let Some(area) = self.areas.iter().find(|x|x.vpn_range.contains(&vpn)) {
             area.page_fault(page_fault)
         } else {
@@ -479,7 +487,7 @@ impl MapArea {
                 map_type: self.map_type,
                 map_perm: self.map_perm,
                 file: self.file.clone(),
-                file_offset: self.file_offset,
+                file_offset: self.file_offset, // cannot be wrong
             };
             other = Self {
                 vpn_range: VPNRange::new(vpn, self.vpn_range.get_end()),
@@ -487,7 +495,7 @@ impl MapArea {
                 map_type: self.map_type,
                 map_perm: self.map_perm,
                 file: self.file.clone(),
-                file_offset: self.file_offset + left_half_size,
+                file_offset: if self.file.is_some() {self.file_offset + left_half_size} else {0},
             };
             return (left, other);
         }
@@ -549,19 +557,19 @@ impl MapArea {
 
     fn map_identity(
         page_table: &PageTable,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
         map_perm: MapPermission
     ) -> Self {
-        Self::new(page_table, start_vpn, end_vpn, MapType::Identity, map_perm, None, 0, None)
+        Self::new(page_table, start_va.floor(), end_va.ceil(), MapType::Identity, map_perm, None, 0, None)
     }
     fn map_framed(
         page_table: &PageTable,
-        start_vpn: VirtPageNum,
-        end_vpn: VirtPageNum,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
         map_perm: MapPermission
     ) -> Self {
-        Self::new(page_table, start_vpn, end_vpn, MapType::Framed, map_perm, None, 0, None)
+        Self::new(page_table, start_va.floor(), end_va.ceil(), MapType::Framed, map_perm, None, 0, None)
     }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
@@ -572,11 +580,12 @@ impl MapArea {
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         let len = self.vpn_range.into_iter().count();
+        let file_offset = if self.file.is_some() {self.file_offset + len * PAGE_SIZE} else {0};
         let delta = Self::new(page_table, 
             self.vpn_range.get_end(), new_end, 
             self.map_type, self.map_perm,
             self.file.clone(), 
-            self.file_offset + len * PAGE_SIZE, None);
+            file_offset, None);
         let original = core::mem::replace(self, unsafe { core::mem::zeroed() });
         let merged = original.merge(delta);
         core::mem::forget(core::mem::replace(self, merged));
@@ -606,7 +615,8 @@ impl MapArea {
     }
     pub fn load_one(&self, vpn: VirtPageNum) {
         let flags: PTEFlags = self.map_perm.into();
-        self.data_frames.get(&vpn).unwrap().load(flags | PTEFlags::V);
+        let page = self.data_frames.get(&vpn).unwrap();
+        page.load(flags | PTEFlags::V);
     }
     pub fn load_all(&self) {
         for vpn in self.vpn_range {
@@ -618,8 +628,26 @@ impl MapArea {
         self
     }
 
+    /// Fork the whole area as normal data.
     pub fn fork(&self, other: &PageTable) -> Self {
-        let new_pages = self.data_frames.iter().map(|(vpn, page)|(*vpn, page.fork(&mut other.create_force(*vpn)))).collect();
+        let new_pages = self.data_frames.iter().map(|(vpn, page)|(*vpn, page.fork(other.create_force(*vpn)))).collect();
+        Self::new(other,
+            self.vpn_range.get_start(),
+            self.vpn_range.get_end(),
+            self.map_type,
+            self.map_perm,
+            self.file.clone(),
+            self.file_offset,
+            Some(new_pages)
+        )
+    }
+
+    // DESIGN NOTE: Don't check `is_critical` in `MapArea` because it's in principle a `MemorySet` or specifically,
+    // an address space, which should determine which pages or areas are critical and decide which strategy to adopt.
+    /// Fork by strict copying an owned page. Will definitely panic if the original page is not both Framed and Owned.<br/>
+    /// This function is only intended for forking critical areas, such as `TRAP_CONTEXT_BASE`, by performing very restricted checks.
+    pub fn fork_strict(&self, other: &PageTable) -> Self {
+        let new_pages = self.data_frames.iter().map(|(vpn, page)|(*vpn, page.fork_strict(other.create_force(*vpn)))).collect();
         Self::new(other,
             self.vpn_range.get_start(),
             self.vpn_range.get_end(),
@@ -634,7 +662,7 @@ impl MapArea {
     pub fn page_fault(&self, page_fault: PageFault) -> isize {
         // upon here, the area is present, we must look into the problem
         // -1 is used by `MemorySet::page_fault` to represent area absence
-        let vpn = page_fault.addr.into();
+        let vpn = page_fault.addr.floor();
         let page = self.data_frames.get(&vpn).unwrap();
         // perform definite permission checks
         if !self.map_perm.contains(MapPermission::U) {
@@ -798,6 +826,12 @@ impl Page {
             Page::Framed(framed) => framed.is_cow()
         }
     }
+    fn is_framed_owned(&self) -> bool {
+        match self {
+            Page::Identity(_) | Page::FileShared(_) => false,
+            Page::Framed(framed) => framed.is_owned()
+        }
+    }
 
     fn file_shared(pte: &mut PageTableEntry, inode: Arc<Inode>, offset: usize) -> Self {
         Self::FileShared(MFileHandle::map(pte as *mut PageTableEntry, inode, offset))
@@ -829,6 +863,21 @@ impl Page {
             }
             Page::FileShared(file_shared) => {
                 Page::FileShared(file_shared.share_fully(other))
+            }
+        }
+    }
+    
+    /// intended for forking `TRAP_CONTEXT_BASE`
+    fn fork_strict(&self, other: &mut PageTableEntry) -> Self {
+        let other = other as *mut PageTableEntry;
+        match self {
+            Page::Identity(_) | Page::FileShared(_) => {
+                panic!("Only for framed mapping")
+            }
+            Page::Framed(framed) => {
+                assert!(self.is_framed_owned());
+                let framed = framed.strict_dup(other);
+                Page::Framed(framed)
             }
         }
     }

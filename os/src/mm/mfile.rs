@@ -139,11 +139,11 @@ impl MFileManager {
         });
         if !self.files.contains(&file) {
             self.files.insert(file.clone());
-            self.map.insert(pte, file);
+            assert!(self.map.insert(pte, file).is_none());
             self.rmap.entry(pos).or_default().insert(pte);
         } else {
             let file = self.files.get(&file).unwrap(); // cannot fail
-            self.map.insert(pte, file.clone());
+            assert!(self.map.insert(pte, file.clone()).is_none());
             self.rmap.entry(pos).or_default().insert(pte);
         }
     }
