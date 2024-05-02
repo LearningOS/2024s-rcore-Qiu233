@@ -8,6 +8,7 @@ use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::vec;
 use easy_fs::Inode;
 use spin::Mutex;
 use core::arch::asm;
@@ -252,58 +253,94 @@ impl MemorySet {
         )
     }
 
-    // fn get_elf_ph_file_range(header: &xmas_elf::header::Header, index: u16) -> (usize, usize) {
-    //     let pt2 = &header.pt2;
-    //     if !(index < pt2.ph_count() && pt2.ph_offset() > 0 && pt2.ph_entry_size() > 0) {
-    //         panic!("There are no program headers in this file");
-    //     }
+    fn get_elf_ph_file_range(header: &xmas_elf::header::Header, index: u16) -> (usize, usize) {
+        let pt2 = &header.pt2;
+        if !(index < pt2.ph_count() && pt2.ph_offset() > 0 && pt2.ph_entry_size() > 0) {
+            panic!("There are no program headers in this file");
+        }
 
-    //     let start = pt2.ph_offset() as usize + index as usize * pt2.ph_entry_size() as usize;
-    //     let end = start + pt2.ph_entry_size() as usize;
-    //     (start, end)
-    // }
+        let start = pt2.ph_offset() as usize + index as usize * pt2.ph_entry_size() as usize;
+        let end = start + pt2.ph_entry_size() as usize;
+        (start, end)
+    }
 
-    // /// load elf program with demand paging
-    // pub fn from_elf_lazy(inode: Arc<Inode>) -> (Self, usize, usize) {
-    //     let mut memory_set = Self::new_bare();
-    //     memory_set.map_trampoline();
-    //     let mut header_buf = vec![0; 64];
-    //     inode.read_at(0, &mut header_buf);
-    //     let elf_header: xmas_elf::header::Header = xmas_elf::header::parse_header(&header_buf).expect("invalid elf header");
-    //     assert_eq!(elf_header.pt1.magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
+    /// load elf program with demand paging
+    pub fn from_elf_lazy(inode: Arc<Inode>) -> (Self, usize, usize) {
+        let mut memory_set = Self::new_bare();
+        memory_set.map_trampoline();
+        let mut header_buf = vec![0; 64];
+        inode.read_at(0, &mut header_buf);
+        let elf_header: xmas_elf::header::Header = xmas_elf::header::parse_header(&header_buf).expect("invalid elf header");
+        assert_eq!(elf_header.pt1.magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         
-    //     let ph_count = elf_header.pt2.ph_count();
-    //     let mut max_end_vpn = VirtPageNum(0);
-    //     for i in 0..ph_count {
-    //         let (file_range_start, file_range_end) = Self::get_elf_ph_file_range(&elf_header, i);
-    //         let ph = elf.program_header(i).unwrap();
-    //         if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-    //             let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
-    //             let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
-    //             let mut map_perm = MapPermission::U;
-    //             let ph_flags = ph.flags();
-    //             if ph_flags.is_read() {
-    //                 map_perm |= MapPermission::R;
-    //             }
-    //             if ph_flags.is_write() {
-    //                 map_perm |= MapPermission::W;
-    //             }
-    //             if ph_flags.is_execute() {
-    //                 map_perm |= MapPermission::X;
-    //             }
-    //             let map_area = MapArea::map_framed(
-    //                 &memory_set.page_table,
-    //                 // these addresses are guaranteed to be multiple of page size, according to elf format
-    //                 start_va, end_va,
-    //                 map_perm).then_load_all();
-    //             max_end_vpn = map_area.vpn_range.get_end();
-    //             map_area.copy_data(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize], &memory_set.page_table);
-    //             memory_set.new_area(map_area);
-    //         }
-    //     }
-
-    //     todo!()
-    // }
+        let ph_count = elf_header.pt2.ph_count();
+        let mut max_end_vpn = VirtPageNum(0);
+        for i in 0..ph_count {
+            let (start, end) = Self::get_elf_ph_file_range(&elf_header, i);
+            let mut buf = vec![0; end - start];
+            inode.read_at(start, &mut buf); // TODO: can we reduce this copy?
+            let ph64: &xmas_elf::program::ProgramHeader64 = zero::read(&buf);
+            let ph = xmas_elf::program::ProgramHeader::Ph64(ph64);
+            assert!(ph.offset() % (PAGE_SIZE as u64) == 0);
+            // let pages = ((ph.file_size() as usize) + PAGE_SIZE - 1) / PAGE_SIZE;
+            // let ph = Self::get_elf_ph(&elf_header, i, inode);
+            if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
+                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                let mut map_perm = MapPermission::U;
+                let ph_flags = ph.flags();
+                if ph_flags.is_read() {
+                    map_perm |= MapPermission::R;
+                }
+                if ph_flags.is_write() {
+                    map_perm |= MapPermission::W;
+                }
+                if ph_flags.is_execute() {
+                    map_perm |= MapPermission::X;
+                }
+                let map_area = MapArea::map_file_priv(&memory_set.page_table, start_va, end_va, map_perm, inode.clone(), ph.offset() as usize);
+                max_end_vpn = map_area.vpn_range.get_end();
+                memory_set.new_area(map_area);
+            }
+        }
+        // map user stack with U flags
+        let max_end_va: VirtAddr = max_end_vpn.into();
+        let mut user_stack_bottom: usize = max_end_va.into();
+        // guard page
+        user_stack_bottom += PAGE_SIZE;
+        let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
+        memory_set.new_area(
+            MapArea::map_framed(
+                &memory_set.page_table,
+                user_stack_bottom.into(),
+                user_stack_top.into(),
+                MapPermission::R | MapPermission::W | MapPermission::U,
+            ),
+        );
+        // used in sbrk
+        memory_set.new_area(
+            MapArea::map_framed(
+                &memory_set.page_table,
+                user_stack_top.into(),
+                user_stack_top.into(),
+                MapPermission::R | MapPermission::W | MapPermission::U,
+            ),
+        );
+        // map TrapContext
+        memory_set.new_area(
+            MapArea::map_framed(
+                &memory_set.page_table,
+                TRAP_CONTEXT_BASE.into(),
+                TRAMPOLINE.into(),
+                MapPermission::R | MapPermission::W,
+            ).then_load_all(),
+        );
+        (
+            memory_set,
+            user_stack_top,
+            elf_header.pt2.entry_point() as usize,
+        )
+    }
 
     
     /// only returns true if the mapping is COW and owning succeeds
@@ -632,6 +669,16 @@ impl MapArea {
     ) -> Self {
         Self::map(page_table, start_va.floor(), end_va.ceil(), MapType::Framed, map_perm, None, 0, None)
     }
+    fn map_file_priv(
+        page_table: &PageTable,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+        file: Arc<Inode>,
+        offset: usize
+    ) -> Self {
+        Self::map(page_table, start_va.floor(), end_va.ceil(), MapType::FilePriv, map_perm, Some(file), offset, None)
+    }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         let original = core::mem::replace(self, unsafe { core::mem::zeroed() });
@@ -790,13 +837,21 @@ impl MapArea {
             }
             // FilePriv is only tweaked on W bit
             (PageFaultType::Store, MapType::FilePriv) => {
-                if !page.present() {
-                    self.load_one(vpn); // load for file
-                    0
-                } else if page.fown() { // try to own the priv mapping
-                    0
-                } else {
-                    panic!("impossible");
+                let cond2 = page.flags().contains(PTEFlags::W);
+                let cond1 = page.present();
+                match (cond1, cond2) {
+                    (true, true) => panic!("impossible"),
+                    (false, true) => panic!("impossible"),
+                    (true, false) => {
+                        page.fown();
+                        0
+                    }
+                    (false, false) => {
+                        let flags: PTEFlags = self.map_perm.into();
+                        page.load(flags | PTEFlags::V); // must load before fown
+                        page.fown();
+                        0
+                    }
                 }
             }
             (_, MapType::FilePriv) => {

@@ -22,3 +22,4 @@ easy-fs = { path = "../easy-fs" }
 
 hermit-dtb = "0.1.1"
 spin = "0.7.1"
+zero = "0.1.3"
