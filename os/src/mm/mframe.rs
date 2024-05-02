@@ -222,4 +222,14 @@ impl MFrameHandle {
     pub fn is_cow(&self) -> bool {
         MFRAME_MANAGER.lock().is_cow(self.pte)
     }
+    /// `self` must be owned
+    pub fn by_frame(&self, work: impl Fn(&FrameTracker)) {
+        assert!(self.is_owned());
+        match MFRAME_MANAGER.lock().map.get(&self.pte).unwrap() {
+            MFrame::Owned(frame) => {
+                work(frame)
+            }
+            MFrame::COW(_) | MFrame::Lazy => panic!("impossible")
+        }
+    }
 }

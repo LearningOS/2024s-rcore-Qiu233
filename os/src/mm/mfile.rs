@@ -187,6 +187,13 @@ impl MFileManager {
     fn get_file_pos(&self, pte: *mut PageTableEntry) -> FilePos {
         self.map.get(&pte).unwrap().pos.clone()
     }
+
+    fn strict_dup(&mut self, pte: *mut PageTableEntry, frame: &FrameTracker) {
+        let map = self.map.get(&pte).unwrap();
+        let lock = map.frame.lock();
+        assert!(lock.is_some()); // must be loaded then can be duplicated
+        frame.ppn.get_bytes_array().copy_from_slice(&lock.as_ref().unwrap().ppn.get_bytes_array());
+    }
 }
 
 pub struct MFileHandle {
@@ -225,5 +232,11 @@ impl MFileHandle {
 
     pub fn is_loaded(&self) -> bool {
         MFILE_MANAGER.lock().map.get(&self.pte).unwrap().loaded()
+    }
+
+    /// Caller must guarantee that `self.is_loaded` returns true before calling this function.
+    pub fn strict_dup(&self, frame: &FrameTracker) {
+        assert!(self.is_loaded()); // must be loaded before calling this
+        MFILE_MANAGER.lock().strict_dup(self.pte, frame)
     }
 }

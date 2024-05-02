@@ -252,6 +252,59 @@ impl MemorySet {
         )
     }
 
+    // fn get_elf_ph_file_range(header: &xmas_elf::header::Header, index: u16) -> (usize, usize) {
+    //     let pt2 = &header.pt2;
+    //     if !(index < pt2.ph_count() && pt2.ph_offset() > 0 && pt2.ph_entry_size() > 0) {
+    //         panic!("There are no program headers in this file");
+    //     }
+
+    //     let start = pt2.ph_offset() as usize + index as usize * pt2.ph_entry_size() as usize;
+    //     let end = start + pt2.ph_entry_size() as usize;
+    //     (start, end)
+    // }
+
+    // /// load elf program with demand paging
+    // pub fn from_elf_lazy(inode: Arc<Inode>) -> (Self, usize, usize) {
+    //     let mut memory_set = Self::new_bare();
+    //     memory_set.map_trampoline();
+    //     let mut header_buf = vec![0; 64];
+    //     inode.read_at(0, &mut header_buf);
+    //     let elf_header: xmas_elf::header::Header = xmas_elf::header::parse_header(&header_buf).expect("invalid elf header");
+    //     assert_eq!(elf_header.pt1.magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
+        
+    //     let ph_count = elf_header.pt2.ph_count();
+    //     let mut max_end_vpn = VirtPageNum(0);
+    //     for i in 0..ph_count {
+    //         let (file_range_start, file_range_end) = Self::get_elf_ph_file_range(&elf_header, i);
+    //         let ph = elf.program_header(i).unwrap();
+    //         if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+    //             let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
+    //             let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+    //             let mut map_perm = MapPermission::U;
+    //             let ph_flags = ph.flags();
+    //             if ph_flags.is_read() {
+    //                 map_perm |= MapPermission::R;
+    //             }
+    //             if ph_flags.is_write() {
+    //                 map_perm |= MapPermission::W;
+    //             }
+    //             if ph_flags.is_execute() {
+    //                 map_perm |= MapPermission::X;
+    //             }
+    //             let map_area = MapArea::map_framed(
+    //                 &memory_set.page_table,
+    //                 // these addresses are guaranteed to be multiple of page size, according to elf format
+    //                 start_va, end_va,
+    //                 map_perm).then_load_all();
+    //             max_end_vpn = map_area.vpn_range.get_end();
+    //             map_area.copy_data(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize], &memory_set.page_table);
+    //             memory_set.new_area(map_area);
+    //         }
+    //     }
+
+    //     todo!()
+    // }
+
     
     /// only returns true if the mapping is COW and owning succeeds
     pub fn cown(&mut self, vpn: VirtPageNum) -> bool {
@@ -408,9 +461,9 @@ impl MemorySet {
     /// * -3: attempted to execute non-executable area
     /// * -4: attempted to write to non-writable area
     /// * -5: attempted to read from non-readable area
-    pub fn page_fault(&self, page_fault: PageFault) -> isize {
+    pub fn page_fault(&mut self, page_fault: PageFault) -> isize {
         let vpn: VirtPageNum = page_fault.addr.floor();
-        if let Some(area) = self.areas.iter().find(|x|x.vpn_range.contains(&vpn)) {
+        if let Some(area) = self.areas.iter_mut().find(|x|x.vpn_range.contains(&vpn)) {
             area.page_fault(page_fault)
         } else {
             -1 // no area containing the address
@@ -440,7 +493,7 @@ impl MapArea {
         match self.map_type {
             MapType::Identity => {}
             MapType::Framed => {}
-            MapType::FileShared => {
+            MapType::FileShared | MapType::FilePriv => {
                 assert!(self.file_offset + len_left * PAGE_SIZE == other.file_offset);
             }
         }
@@ -500,7 +553,7 @@ impl MapArea {
             return (left, other);
         }
     }
-    fn new(
+    fn map(
         page_table: &PageTable,
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
@@ -512,7 +565,7 @@ impl MapArea {
     ) -> Self {
         match map_type {
             MapType::Identity | MapType::Framed => assert!(file.is_none() && file_offset == 0),
-            MapType::FileShared => assert!(file.is_some() && file_offset % PAGE_SIZE == 0),
+            MapType::FileShared | MapType::FilePriv => assert!(file.is_some() && file_offset % PAGE_SIZE == 0),
         }
         let vpn_range = VPNRange::new(start_vpn, end_vpn);
         let data_frames = match data_frames_override {
@@ -541,6 +594,14 @@ impl MapArea {
                             data_frames.insert(vpn, page);
                         }
                     }
+                    MapType::FilePriv => {
+                        for vpn in vpn_range {
+                            let offset = (vpn.0 - start_vpn.0) * PAGE_SIZE;
+                            let file = file.clone().unwrap(); // cannot fail
+                            let page = Page::file_priv(page_table.create_force(vpn), file, offset);
+                            data_frames.insert(vpn, page);
+                        }
+                    }
                 }
                 data_frames
             }
@@ -561,7 +622,7 @@ impl MapArea {
         end_va: VirtAddr,
         map_perm: MapPermission
     ) -> Self {
-        Self::new(page_table, start_va.floor(), end_va.ceil(), MapType::Identity, map_perm, None, 0, None)
+        Self::map(page_table, start_va.floor(), end_va.ceil(), MapType::Identity, map_perm, None, 0, None)
     }
     fn map_framed(
         page_table: &PageTable,
@@ -569,7 +630,7 @@ impl MapArea {
         end_va: VirtAddr,
         map_perm: MapPermission
     ) -> Self {
-        Self::new(page_table, start_va.floor(), end_va.ceil(), MapType::Framed, map_perm, None, 0, None)
+        Self::map(page_table, start_va.floor(), end_va.ceil(), MapType::Framed, map_perm, None, 0, None)
     }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
@@ -581,7 +642,7 @@ impl MapArea {
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         let len = self.vpn_range.into_iter().count();
         let file_offset = if self.file.is_some() {self.file_offset + len * PAGE_SIZE} else {0};
-        let delta = Self::new(page_table, 
+        let delta = Self::map(page_table, 
             self.vpn_range.get_end(), new_end, 
             self.map_type, self.map_perm,
             self.file.clone(), 
@@ -631,7 +692,7 @@ impl MapArea {
     /// Fork the whole area as normal data.
     pub fn fork(&self, other: &PageTable) -> Self {
         let new_pages = self.data_frames.iter().map(|(vpn, page)|(*vpn, page.fork(other.create_force(*vpn)))).collect();
-        Self::new(other,
+        Self::map(other,
             self.vpn_range.get_start(),
             self.vpn_range.get_end(),
             self.map_type,
@@ -648,7 +709,7 @@ impl MapArea {
     /// This function is only intended for forking critical areas, such as `TRAP_CONTEXT_BASE`, by performing very restricted checks.
     pub fn fork_strict(&self, other: &PageTable) -> Self {
         let new_pages = self.data_frames.iter().map(|(vpn, page)|(*vpn, page.fork_strict(other.create_force(*vpn)))).collect();
-        Self::new(other,
+        Self::map(other,
             self.vpn_range.get_start(),
             self.vpn_range.get_end(),
             self.map_type,
@@ -659,11 +720,11 @@ impl MapArea {
         )
     }
 
-    pub fn page_fault(&self, page_fault: PageFault) -> isize {
+    pub fn page_fault(&mut self, page_fault: PageFault) -> isize {
         // upon here, the area is present, we must look into the problem
         // -1 is used by `MemorySet::page_fault` to represent area absence
         let vpn = page_fault.addr.floor();
-        let page = self.data_frames.get(&vpn).unwrap();
+        let page = self.data_frames.get_mut(&vpn).unwrap();
         // perform definite permission checks
         if !self.map_perm.contains(MapPermission::U) {
             return -2; // cannot access non-user mappings
@@ -727,6 +788,25 @@ impl MapArea {
                     panic!("impossible");
                 }
             }
+            // FilePriv is only tweaked on W bit
+            (PageFaultType::Store, MapType::FilePriv) => {
+                if !page.present() {
+                    self.load_one(vpn); // load for file
+                    0
+                } else if page.fown() { // try to own the priv mapping
+                    0
+                } else {
+                    panic!("impossible");
+                }
+            }
+            (_, MapType::FilePriv) => {
+                if !page.present() {
+                    self.load_one(vpn); // load for file
+                    0
+                } else {
+                    panic!("impossible");
+                }
+            }
         }
     }
 }
@@ -739,6 +819,9 @@ pub enum MapType {
     /// Backed by a file
     #[allow(unused)]
     FileShared,
+    /// Backed by a file, COW
+    #[allow(unused)]
+    FilePriv,
 }
 
 bitflags! {
@@ -792,6 +875,8 @@ enum Page {
     Identity(MIdentityHandle),
     Framed(MFrameHandle),
     FileShared(MFileHandle),
+    /// COW file mapping
+    FilePriv(MFileHandle)
 }
 
 unsafe impl Send for Page {}
@@ -805,6 +890,7 @@ impl Page {
                 Page::Identity(id) => id.pte.as_ref().unwrap().flags(),
                 Page::Framed(framed) => framed.pte.as_ref().unwrap().flags(),
                 Page::FileShared(file) => file.pte.as_ref().unwrap().flags(),
+                Page::FilePriv(file) => file.pte.as_ref().unwrap().flags(),
             }
         }
     }
@@ -816,25 +902,28 @@ impl Page {
 
     fn is_framed_lazy(&self) -> bool {
         match self {
-            Page::Identity(_) | Page::FileShared(_) => false,
+            Page::Identity(_) | Page::FileShared(_) | Page::FilePriv(_) => false,
             Page::Framed(framed) => framed.is_lazy()
         }
     }
     fn is_framed_cow(&self) -> bool {
         match self {
-            Page::Identity(_) | Page::FileShared(_) => false,
+            Page::Identity(_) | Page::FileShared(_) | Page::FilePriv(_) => false,
             Page::Framed(framed) => framed.is_cow()
         }
     }
     fn is_framed_owned(&self) -> bool {
         match self {
-            Page::Identity(_) | Page::FileShared(_) => false,
+            Page::Identity(_) | Page::FileShared(_) | Page::FilePriv(_) => false,
             Page::Framed(framed) => framed.is_owned()
         }
     }
 
     fn file_shared(pte: &mut PageTableEntry, inode: Arc<Inode>, offset: usize) -> Self {
         Self::FileShared(MFileHandle::map(pte as *mut PageTableEntry, inode, offset))
+    }
+    fn file_priv(pte: &mut PageTableEntry, inode: Arc<Inode>, offset: usize) -> Self {
+        Self::FilePriv(MFileHandle::map(pte as *mut PageTableEntry, inode, offset))
     }
 
     fn framed_lazy(pte: &mut PageTableEntry) -> Self {
@@ -864,6 +953,9 @@ impl Page {
             Page::FileShared(file_shared) => {
                 Page::FileShared(file_shared.share_fully(other))
             }
+            Page::FilePriv(file_priv) => {
+                Page::FilePriv(file_priv.share_fully(other))
+            }
         }
     }
     
@@ -871,7 +963,7 @@ impl Page {
     fn fork_strict(&self, other: &mut PageTableEntry) -> Self {
         let other = other as *mut PageTableEntry;
         match self {
-            Page::Identity(_) | Page::FileShared(_) => {
+            Page::Identity(_) | Page::FileShared(_) | Page::FilePriv(_) => {
                 panic!("Only for framed mapping")
             }
             Page::Framed(framed) => {
@@ -886,6 +978,7 @@ impl Page {
         match self {
             Page::Identity(_) => false,
             Page::FileShared(_) => false,
+            Page::FilePriv(_) => false,
             Page::Framed(framed) => {
                 if framed.is_cow() {
                     framed.cown();
@@ -897,13 +990,32 @@ impl Page {
         }
     }
 
-    fn load(&self, flags: PTEFlags) {
+    fn fown(&mut self) -> bool {
+        match self {
+            Page::Identity(_) | Page::Framed(_) | Page::FileShared(_) => false,
+            Page::FilePriv(file) => {
+                let mut flags = unsafe { file.pte.as_ref().unwrap().flags() };
+                assert!(!flags.contains(PTEFlags::W) && flags.contains(PTEFlags::V));
+                flags.set(PTEFlags::W, true);
+                let handle = MFrameHandle::map_strict(file.pte, flags);
+                handle.by_frame(|x|file.strict_dup(x));
+                *self = Page::Framed(handle);
+                true
+            }
+        }
+    }
+
+    fn load(&self, mut flags: PTEFlags) {
         match self {
             Page::Identity(_) => {}
             Page::Framed(frame_handle) => {
                 frame_handle.load(flags);
             }
             Page::FileShared(file_handle) => {
+                file_handle.load(flags);
+            }
+            Page::FilePriv(file_handle) => {
+                flags.set(PTEFlags::W, false);
                 file_handle.load(flags);
             }
         }

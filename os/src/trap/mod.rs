@@ -96,7 +96,7 @@ pub fn trap_handler() -> ! {
             };
             let result = handle_page_fault(PageFault::new(pf_type, stval.into()));
             if result == 0 {
-                trace!("[kernel] encountered {:?} but successfully owned the shared page", scause.cause());
+                trace!("[kernel] encountered {:?} but successfully recovered from it", scause.cause());
             } else {
                 println!(
                     "[kernel] trap_handler:  {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
